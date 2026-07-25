@@ -1,0 +1,173 @@
+# Prometheus alerting rules for TokenGuard AI.
+#
+# Every expression references a metric that app/observability/metrics.py
+# actually registers, so these rules can be validated with:
+#
+#   docker run --rm -v "${PWD}/observability:/rules" \
+#     --entrypoint promtool prom/prometheus:latest \
+#     check rules /rules/alert_rules.yml
+#
+# Thresholds are starting points. Tune them against a week of real traffic
+# before wiring them to a pager: an alert that fires constantly gets muted,
+# which is worse than having no alert at all.
+#
+# Routing these to a destination needs Alertmanager, which is not part of the
+# Compose stack. Grafana can also evaluate the same expressions directly.
+
+groups:
+  - name: tokenguard-availability
+    interval: 30s
+    rules:
+      - alert: TokenGuardAPIDown
+        expr: up{job="tokenguard-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: TokenGuard API is not being scraped
+          description: >-
+            Prometheus cannot reach the API target for more than 2 minutes.
+            Either the service is down or the metrics endpoint is disabled.
+            Check `docker compose ps` and `docker compose logs api`.
+
+      - alert: TokenGuardHighErrorRate
+        expr: >-
+          sum(rate(tokenguard_http_requests_total{status_code=~"5.."}[5m]))
+          /
+          sum(rate(tokenguard_http_requests_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5% of requests are failing with 5xx
+          description: >-
+            Sustained server-side failures. Check the API logs, then
+            /health for an unhealthy PostgreSQL or Redis dependency.
+
+      - alert: TokenGuardHighLatency
+        expr: >-
+          histogram_quantile(
+            0.95,
+            sum(rate(tokenguard_http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: p95 request latency is above 2 seconds
+          description: >-
+            Includes provider generation time, so a slow upstream model can
+            trigger this without anything being wrong with the gateway.
+            Compare against tokenguard_provider_latency_seconds before
+            treating it as a gateway problem.
+
+  - name: tokenguard-providers
+    interval: 30s
+    rules:
+      - alert: TokenGuardProviderFailureRate
+        expr: >-
+          sum(rate(tokenguard_provider_attempts_total{result="failure"}[5m])) by (provider)
+          /
+          sum(rate(tokenguard_provider_attempts_total[5m])) by (provider)
+          > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            More than 20% of attempts to {{ $labels.provider }} are failing
+          description: >-
+            Fallback may be absorbing this, so user-visible errors can stay
+            low while cost and latency rise. Check credentials, quota, and
+            the provider status page.
+
+      - alert: TokenGuardCircuitBreakerOpen
+        expr: tokenguard_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Circuit breaker for {{ $labels.provider }} is open
+          description: >-
+            Requests to this provider are being rejected without an attempt.
+            The breaker half-opens automatically after
+            CIRCUIT_BREAKER_RESET_TIMEOUT_SECONDS; a breaker that keeps
+            reopening means the provider is still unhealthy.
+
+      - alert: TokenGuardProviderUnhealthy
+        expr: tokenguard_provider_health_score < 40
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Health score for {{ $labels.provider }} is below 40
+          description: >-
+            Matches PROVIDER_UNHEALTHY_SCORE_THRESHOLD, the point at which
+            routing starts avoiding this provider.
+
+      - alert: TokenGuardFallbackSurge
+        expr: sum(increase(tokenguard_fallbacks_total[15m])) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Provider fallback is happening frequently
+          description: >-
+            Requests are being served, but by the secondary provider, which
+            usually costs more. Investigate the primary provider.
+
+  - name: tokenguard-governance
+    interval: 30s
+    rules:
+      - alert: TokenGuardGovernanceBlockSpike
+        expr: >-
+          sum(increase(tokenguard_governance_decisions_total{action="block"}[10m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Unusual number of governance blocks
+          description: >-
+            Either an integration is sending prompts that violate policy, or
+            someone is probing the gateway. Review
+            /v1/security/events for the affected project.
+
+      - alert: TokenGuardOutputSecretsDetected
+        expr: >-
+          sum(increase(tokenguard_pii_findings_total{action="block"}[15m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Output was blocked for containing sensitive data
+          description: >-
+            A model response contained credential- or PII-shaped content and
+            was withheld. Investigate promptly: a leaking system prompt or a
+            poisoned context can produce this.
+
+      - alert: TokenGuardRateLimitSpike
+        expr: >-
+          sum(increase(tokenguard_rate_limit_rejections_total[5m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Large number of rate-limit rejections
+          description: >-
+            A client is exceeding its per-project limit. Confirm whether the
+            traffic is legitimate before raising requests_per_minute.
+
+      - alert: TokenGuardBudgetBlocks
+        expr: >-
+          sum(increase(tokenguard_budget_decisions_total{action="block"}[30m])) by (project_id) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Project {{ $labels.project_id }} is being blocked by its budget
+          description: >-
+            The project has exhausted its daily token or cost budget and its
+            requests are now failing. Raise the budget or wait for the daily
+            reset.

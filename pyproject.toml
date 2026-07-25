@@ -1,0 +1,208 @@
+[project]
+name = "tokenguardai"
+version = "1.5.0"
+description = "TokenGuard AI — an intelligent LLM gateway for cost control, caching, routing, governance, and observability."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.18.5",
+    "celery[redis]>=5.3.1",
+    "cryptography>=49.0.0",
+    "email-validator>=2.3.0",
+    "fastapi>=0.139.2",
+    "httpx>=0.28.1",
+    "numpy>=2.5.1",
+    "openai>=2.48.0",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+    "opentelemetry-instrumentation-fastapi>=0.65b0",
+    "opentelemetry-instrumentation-httpx>=0.65b0",
+    "opentelemetry-instrumentation-redis>=0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.65b0",
+    "opentelemetry-sdk>=1.44.0",
+    "pandas>=3.0.3",
+    "presidio-analyzer>=2.2.362",
+    "presidio-anonymizer>=2.2.362",
+    "prometheus-client>=0.25.0",
+    "psycopg[binary]>=3.3.4",
+    "pwdlib[argon2]>=0.3.0",
+    "pybreaker>=1.4.1",
+    "pydantic-settings>=2.14.2",
+    "pyjwt>=2.13.0",
+    "pytest>=9.1.1",
+    "python-dotenv>=1.2.2",
+    "python-json-logger>=4.1.0",
+    "redis>=8.0.1",
+    "scikit-learn>=1.9.0",
+    "sentence-transformers>=5.6.0",
+    "sqlalchemy>=2.0.51",
+    "streamlit>=1.59.2",
+    "tenacity>=9.1.4",
+    "uvicorn[standard]>=0.51.0",
+]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "factory-boy>=3.3.3",
+    "faker>=40.36.0",
+    "gitpython>=3.1.55",
+    "locust>=2.46.2",
+    "mypy>=2.3.0",
+    "pip-audit>=2.10.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.16.0",
+    "types-redis>=4.6.0.20241004",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Async tests in this repo use the anyio plugin (@pytest.mark.anyio).
+# pytest-asyncio therefore stays in strict mode so the two plugins do not
+# both try to drive the same coroutine.
+asyncio_mode = "strict"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "unit: fast isolated tests",
+    "integration: tests requiring PostgreSQL or Redis",
+    "e2e: full API workflow tests",
+    "security: authorization and security tests",
+    "load: performance-related tests",
+    "slow: tests that take more than a few seconds",
+]
+filterwarnings = [
+    # New warnings raised by our own code must fail the build.
+    "error",
+    # Third-party deprecations we do not control.
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+    "ignore::DeprecationWarning:spacy.*",
+    "ignore::DeprecationWarning:celery.*",
+    "ignore::DeprecationWarning:kombu.*",
+    "ignore::DeprecationWarning:redis.*",
+    "ignore::DeprecationWarning:pydantic.*",
+    "ignore::PendingDeprecationWarning",
+    # Legacy per-test SQLite fixtures leave connections for the GC to reap.
+    "ignore::ResourceWarning",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+    "ignore:.*HTTP_422_UNPROCESSABLE_ENTITY.*",
+    "ignore:.*datetime.datetime.utcnow.*:DeprecationWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = [
+    "app/workers/celery_app.py",
+    "alembic/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 85
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+extend-exclude = [
+    "alembic/versions",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "S",
+    "ASYNC",
+    "RUF",
+]
+ignore = [
+    "E501",
+    "B008",
+    "S101",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",
+    "S105",
+    "S106",
+    "S311",
+]
+# "token_type" here is a Prometheus label value (input/output), not a secret.
+"app/api/chat.py" = ["S106"]
+"app/api/streaming.py" = ["S106"]
+# Placeholder defaults that Settings.enforce_production_guards rejects in
+# production, plus a local base URL.
+"app/core/config.py" = ["S105"]
+# OAuth2 response field: {"token_type": "bearer"}.
+"app/schemas/identity.py" = ["S105"]
+# These extend sys.path before importing application modules.
+"dashboard/streamlit_app.py" = ["E402"]
+"scripts/bootstrap_admin.py" = ["E402"]
+# S105: the demo password is deliberately printed to the console, and the
+# script refuses to run when ENVIRONMENT=production.
+"scripts/seed_demo.py" = ["E402", "S105"]
+"load_tests/**/*.py" = [
+    "S311",
+]
+"scripts/**/*.py" = [
+    "S603",
+    "S607",
+]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_configs = true
+warn_unreachable = true
+show_error_codes = true
+ignore_missing_imports = true
+plugins = [
+    "pydantic.mypy",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "presidio_analyzer.*",
+    "presidio_anonymizer.*",
+    "factory.*",
+    "celery.*",
+    "pybreaker.*",
+    "locust.*",
+]
+ignore_missing_imports = true
+
+# Security-sensitive modules are held to a stricter standard than the
+# rest of the codebase while typing debt is paid down incrementally.
+[[tool.mypy.overrides]]
+module = [
+    "app.security.*",
+    "app.dependencies.*",
+    "app.services.password_service",
+    "app.services.token_service_jwt",
+    "app.services.identity_service",
+    "app.services.auth_rate_limit_service",
+    "app.services.encryption_service",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true

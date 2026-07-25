@@ -1,0 +1,14 @@
+.venv
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.git
+.gitignore
+.env
+tokenguard.db
+*.pyc
+*.pyo
+*.log
+alembic/__pycache__
+tests

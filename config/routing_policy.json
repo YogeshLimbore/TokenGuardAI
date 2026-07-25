@@ -1,0 +1,26 @@
+{
+    "routes": {
+      "simple": {
+        "provider": "ollama",
+        "model": "llama3.2",
+        "maximum_output_tokens": 300,
+        "description": "Local route for simple and low-risk tasks"
+      },
+      "balanced": {
+        "provider": "openrouter",
+        "model": "openai/gpt-4.1-mini",
+        "maximum_output_tokens": 1000,
+        "description": "Balanced route for general-purpose requests"
+      },
+      "advanced": {
+        "provider": "openrouter",
+        "model": "anthropic/claude-sonnet-4",
+        "maximum_output_tokens": 3000,
+        "description": "Strong route for complex reasoning, coding, and architecture"
+      }
+    },
+    "thresholds": {
+      "balanced_score": 3,
+      "advanced_score": 7
+    }
+  }

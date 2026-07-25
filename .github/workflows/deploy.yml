@@ -1,0 +1,141 @@
+name: Deploy
+
+# Manual deployment over SSH to a host that already has the repository
+# checked out at $DEPLOY_PATH and a populated .env.production.
+#
+# Required environment secrets:
+#   DEPLOY_SSH_PRIVATE_KEY  private key authorized on the target host
+#   DEPLOY_HOST             hostname or IP of the target host
+#   DEPLOY_USER             SSH user
+#   DEPLOY_PATH             absolute path to the checkout (e.g. /opt/tokenguard)
+#   API_BASE_URL            public base URL, e.g. https://api.example.com
+# Optional:
+#   SMOKE_TEST_PROJECT_KEY  project API key used for an authenticated read
+#
+# Configure the `staging` and `production` environments under
+# Settings -> Environments, and add a required reviewer to `production` so
+# every production deploy needs an explicit approval.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      git_ref:
+        description: Branch or tag to deploy
+        required: false
+        default: main
+        type: string
+      image_tag:
+        description: Image tag to deploy (e.g. 1.5.0). Leave blank to keep the tag already in .env.production.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            DEPLOY_PATH="${{ secrets.DEPLOY_PATH }}" \
+            GIT_REF="${{ inputs.git_ref }}" \
+            IMAGE_TAG="${{ inputs.image_tag }}" \
+            REPOSITORY="${{ github.repository }}" \
+            'bash -euo pipefail -s' <<'REMOTE'
+          cd "$DEPLOY_PATH"
+
+          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+
+          # A migration that goes wrong is only recoverable if the backup was
+          # taken first, so this runs before anything else touches the schema.
+          echo "==> Backing up PostgreSQL"
+          mkdir -p backups
+          BACKUP="backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
+          $COMPOSE exec -T postgres pg_dump \
+            -U "${POSTGRES_USER:-tokenguard}" \
+            -d "${POSTGRES_DB:-tokenguard}" \
+            -Fc -f /tmp/pre-deploy.dump
+          $COMPOSE cp postgres:/tmp/pre-deploy.dump "$BACKUP"
+          $COMPOSE exec -T postgres rm -f /tmp/pre-deploy.dump
+          echo "Backup written to $BACKUP"
+
+          echo "==> Fetching $GIT_REF"
+          git fetch --all --tags --prune
+          git checkout "$GIT_REF"
+          git pull --ff-only || echo "Detached tag checkout; skipping pull."
+
+          if [ -n "$IMAGE_TAG" ]; then
+            echo "==> Pinning images to $IMAGE_TAG"
+            sed -i "s|^TOKEN_GUARD_API_IMAGE=.*|TOKEN_GUARD_API_IMAGE=ghcr.io/${REPOSITORY}/api:${IMAGE_TAG}|" .env.production
+            sed -i "s|^TOKEN_GUARD_DASHBOARD_IMAGE=.*|TOKEN_GUARD_DASHBOARD_IMAGE=ghcr.io/${REPOSITORY}/dashboard:${IMAGE_TAG}|" .env.production
+          fi
+
+          echo "==> Pulling images"
+          $COMPOSE pull
+
+          echo "==> Starting data services"
+          $COMPOSE up -d postgres redis
+
+          echo "==> Running migrations"
+          $COMPOSE run --rm api uv run alembic upgrade head
+
+          echo "==> Starting application services"
+          $COMPOSE up -d
+
+          sleep 10
+          $COMPOSE ps
+          REMOTE
+
+      - name: Verify health
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --max-time 10 "${API_BASE_URL}/health"; then
+              echo ""
+              echo "Health check passed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Health check attempt ${attempt} failed; retrying in 5s."
+            sleep 5
+          done
+
+          echo "::error::Deployment failed health verification. Roll back by restoring the previous image tag (see docs/deployment.md)."
+          exit 1
+
+      - name: Smoke test
+        env:
+          TOKEN_GUARD_API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          SMOKE_TEST_PROJECT_KEY: ${{ secrets.SMOKE_TEST_PROJECT_KEY }}
+        run: uv run --with httpx python scripts/smoke_test.py

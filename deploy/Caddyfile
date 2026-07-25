@@ -1,0 +1,86 @@
+# Caddy reverse proxy for the production stack.
+#
+# Domains and the ACME contact address come from the environment (see
+# .env.production.example). Caddy requests and renews certificates
+# automatically once DNS points at this host and ports 80/443 are reachable.
+#
+# Local testing without public DNS: set API_DOMAIN=localhost and
+# DASHBOARD_DOMAIN=localhost:8443, which makes Caddy issue an internal
+# certificate instead of contacting Let's Encrypt.
+{
+	email {$TLS_CONTACT_EMAIL}
+
+	# Uncomment while testing to avoid Let's Encrypt rate limits.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Cross-Origin-Opener-Policy "same-origin"
+
+		# Never advertise the proxy or backend software.
+		-Server
+		-X-Powered-By
+	}
+}
+
+{$API_DOMAIN} {
+	import security_headers
+
+	header {
+		X-Frame-Options "DENY"
+	}
+
+	# Streaming endpoints emit server-sent events; buffering them would
+	# defeat the point, so flush immediately and allow a long-lived response.
+	@streaming path /v1/chat/completions/stream*
+	reverse_proxy @streaming api:8000 {
+		flush_interval -1
+		transport http {
+			response_header_timeout 10m
+		}
+	}
+
+	reverse_proxy api:8000
+
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+{$DASHBOARD_DOMAIN} {
+	import security_headers
+
+	header {
+		# Streamlit renders inside its own frame.
+		X-Frame-Options "SAMEORIGIN"
+	}
+
+	# Streamlit keeps a websocket open for every session; Caddy upgrades
+	# those connections and forwards the Host and X-Forwarded-* headers
+	# without any extra configuration.
+	reverse_proxy dashboard:8501
+
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Grafana is only reachable when the `observability` profile is running.
+# Uncomment and set GRAFANA_DOMAIN to expose it publicly, and set
+# GF_SERVER_ROOT_URL on the grafana service to match.
+#
+# {$GRAFANA_DOMAIN} {
+# 	import security_headers
+# 	reverse_proxy grafana:3000
+# 	encode zstd gzip
+# }

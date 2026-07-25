@@ -1,0 +1,61 @@
+# Gitleaks configuration for TokenGuard AI.
+#
+# Run locally:
+#   docker run --rm -v "${PWD}:/repo" zricethezav/gitleaks:latest detect `
+#     --source="/repo" --config="/repo/.gitleaks.toml" --no-git
+#
+# Allowlisting policy: only narrow, documented exceptions for synthetic test
+# values. Prefixes such as sk-, tg_live_, tg_admin_, "Bearer", and
+# "PRIVATE KEY" are never allowlisted globally — those are precisely the
+# patterns that must keep firing.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tokenguard-project-key"
+description = "TokenGuard project API key"
+regex = '''\btg_live_[A-Za-z0-9_-]{20,}\b'''
+tags = ["tokenguard", "api-key"]
+
+[[rules]]
+id = "tokenguard-admin-key"
+description = "TokenGuard administrator API key"
+regex = '''\btg_admin_[A-Za-z0-9_-]{20,}\b'''
+tags = ["tokenguard", "api-key"]
+
+[[rules]]
+id = "tokenguard-master-key"
+description = "Fernet master key assigned to TOKEN_GUARD_MASTER_KEY"
+regex = '''(?i)TOKEN_GUARD_MASTER_KEY\s*[=:]\s*['"]?[A-Za-z0-9+/=_-]{32,}['"]?'''
+tags = ["tokenguard", "encryption-key"]
+
+[[rules]]
+id = "tokenguard-jwt-secret"
+description = "Real value assigned to JWT_SECRET_KEY"
+regex = '''(?i)JWT_SECRET_KEY\s*[=:]\s*['"]?[A-Za-z0-9+/=_-]{40,}['"]?'''
+tags = ["tokenguard", "jwt"]
+
+[allowlist]
+description = "Synthetic values used by tests, examples, and documentation"
+
+# Committed templates and generated reports never hold live credentials.
+paths = [
+    '''\.env\.example$''',
+    '''\.env\.test$''',
+    '''(^|/)bandit-report\.json$''',
+    '''(^|/)pip-audit-report\.json$''',
+]
+
+regexes = [
+    # Test-only provider and gateway keys always carry the "testonly" marker.
+    '''testonly''',
+    # Placeholder secrets that Settings.enforce_production_guards rejects.
+    '''change_me_replace_with_long_random_secret_at_least_48_chars''',
+    '''replace_with_a_long_random_secret''',
+    '''replace_with_a_test_secret_at_least_48_characters_long''',
+    '''replace_with_test_fernet_key''',
+    '''test-jwt-secret-that-is-longer-than-forty-eight-characters''',
+    # Documented example password used by fixtures and docs.
+    '''Secure-Test-Password-123!''',
+]

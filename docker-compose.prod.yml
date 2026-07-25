@@ -1,0 +1,173 @@
+# Production-oriented Compose overlay.
+#
+# Usage:
+#   cp .env.production.example .env.production   # fill real secrets
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     --env-file .env.production up -d
+#
+# Differences from the development stack:
+# - Images are pulled from the registry instead of built locally
+# - Postgres, Redis, the API, and the dashboard publish no host ports;
+#   all public traffic arrives through the Caddy reverse proxy on 80/443
+# - Redis requires a password
+# - Production environment variables are forced (DEBUG=false, docs off)
+# - Observability UIs (Grafana/Jaeger) stay behind the `observability` profile
+
+services:
+  postgres:
+    ports: !override []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    networks: !override [backend]
+
+  redis:
+    ports: !override []
+    command: !override
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: !override [backend]
+
+  api:
+    build: !reset null
+    image: ${TOKEN_GUARD_API_IMAGE:?TOKEN_GUARD_API_IMAGE is required}
+    ports: !override []
+    # Replaces the development .env so a stray file on the host cannot
+    # silently override production configuration.
+    env_file: !override
+      - .env.production
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      ENABLE_DOCS: "false"
+      FORCE_HTTPS_REDIRECT: ${FORCE_HTTPS_REDIRECT:-false}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?ALLOWED_HOSTS is required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks: !override [backend, frontend]
+
+  worker:
+    build: !reset null
+    image: ${TOKEN_GUARD_API_IMAGE}
+    env_file: !override
+      - .env.production
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
+    networks: !override [backend]
+
+  beat:
+    build: !reset null
+    image: ${TOKEN_GUARD_API_IMAGE}
+    env_file: !override
+      - .env.production
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
+    networks: !override [backend]
+
+  dashboard:
+    build: !reset null
+    image: ${TOKEN_GUARD_DASHBOARD_IMAGE:?TOKEN_GUARD_DASHBOARD_IMAGE is required}
+    ports: !override []
+    env_file: !override
+      - .env.production
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      TOKEN_GUARD_API_BASE_URL: http://api:8000
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: !override [backend, frontend]
+
+  # Terminates TLS and is the only service with published ports. Caddy
+  # obtains and renews certificates automatically once DNS points here and
+  # ports 80/443 are reachable from the internet.
+  reverse-proxy:
+    image: caddy:2-alpine
+    container_name: tokenguard-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - tokenguard_caddy_data:/data
+      - tokenguard_caddy_config:/config
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN is required}
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN is required}
+      TLS_CONTACT_EMAIL: ${TLS_CONTACT_EMAIL:?TLS_CONTACT_EMAIL is required}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - frontend
+
+  prometheus:
+    profiles: ["observability"]
+    ports: !override []
+    volumes: !override
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - tokenguard_prometheus_data:/prometheus
+    networks: !override [backend]
+
+  grafana:
+    profiles: ["observability"]
+    ports: !override []
+    networks: !override [backend]
+
+  jaeger:
+    profiles: ["observability"]
+    ports: !override []
+    networks: !override [backend]
+
+  otel-collector:
+    profiles: ["observability"]
+    ports: !override []
+    networks: !override [backend]
+
+networks:
+  # PostgreSQL and Redis are reachable only from other containers.
+  backend:
+    internal: true
+  frontend: {}
+
+volumes:
+  tokenguard_prometheus_data:
+  tokenguard_caddy_data:
+  tokenguard_caddy_config:

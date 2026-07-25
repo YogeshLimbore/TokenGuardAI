@@ -1,0 +1,142 @@
+[
+    {
+      "id": "safe_001",
+      "reference_prompt": "Explain machine learning in simple words.",
+      "candidate_prompt": "What is machine learning? Explain it in an easy way.",
+      "should_reuse": true,
+      "category": "definition_paraphrase"
+    },
+    {
+      "id": "safe_002",
+      "reference_prompt": "What is an API gateway?",
+      "candidate_prompt": "Explain the meaning of an API gateway.",
+      "should_reuse": true,
+      "category": "definition_paraphrase"
+    },
+    {
+      "id": "safe_003",
+      "reference_prompt": "Explain semantic caching.",
+      "candidate_prompt": "What does semantic cache mean?",
+      "should_reuse": true,
+      "category": "definition_paraphrase"
+    },
+    {
+      "id": "safe_004",
+      "reference_prompt": "How does a decision tree work?",
+      "candidate_prompt": "Explain how decision trees make predictions.",
+      "should_reuse": true,
+      "category": "concept_explanation"
+    },
+    {
+      "id": "safe_005",
+      "reference_prompt": "Explain overfitting in machine learning.",
+      "candidate_prompt": "What is model overfitting?",
+      "should_reuse": true,
+      "category": "concept_explanation"
+    },
+    {
+      "id": "safe_006",
+      "reference_prompt": "What is prompt engineering?",
+      "candidate_prompt": "Describe prompt engineering in simple terms.",
+      "should_reuse": true,
+      "category": "definition_paraphrase"
+    },
+    {
+      "id": "safe_007",
+      "reference_prompt": "Explain random forest.",
+      "candidate_prompt": "What is the random forest algorithm?",
+      "should_reuse": true,
+      "category": "definition_paraphrase"
+    },
+    {
+      "id": "safe_008",
+      "reference_prompt": "What is retrieval augmented generation?",
+      "candidate_prompt": "Explain RAG in generative AI.",
+      "should_reuse": true,
+      "category": "abbreviation"
+    },
+    {
+      "id": "unsafe_001",
+      "reference_prompt": "Explain machine learning.",
+      "candidate_prompt": "What are the disadvantages of machine learning?",
+      "should_reuse": false,
+      "category": "different_intent"
+    },
+    {
+      "id": "unsafe_002",
+      "reference_prompt": "What is an API gateway?",
+      "candidate_prompt": "How can I secure an API gateway?",
+      "should_reuse": false,
+      "category": "definition_vs_security"
+    },
+    {
+      "id": "unsafe_003",
+      "reference_prompt": "Explain semantic caching.",
+      "candidate_prompt": "How can semantic caching return incorrect answers?",
+      "should_reuse": false,
+      "category": "definition_vs_risk"
+    },
+    {
+      "id": "unsafe_004",
+      "reference_prompt": "What is a decision tree?",
+      "candidate_prompt": "Compare decision trees and random forests.",
+      "should_reuse": false,
+      "category": "definition_vs_comparison"
+    },
+    {
+      "id": "unsafe_005",
+      "reference_prompt": "Explain model overfitting.",
+      "candidate_prompt": "How can I prevent model overfitting?",
+      "should_reuse": false,
+      "category": "definition_vs_solution"
+    },
+    {
+      "id": "unsafe_006",
+      "reference_prompt": "What is prompt engineering?",
+      "candidate_prompt": "Write a prompt for generating SQL queries.",
+      "should_reuse": false,
+      "category": "definition_vs_generation"
+    },
+    {
+      "id": "unsafe_007",
+      "reference_prompt": "Explain random forest.",
+      "candidate_prompt": "What are the hyperparameters of random forest?",
+      "should_reuse": false,
+      "category": "definition_vs_configuration"
+    },
+    {
+      "id": "unsafe_008",
+      "reference_prompt": "What is RAG?",
+      "candidate_prompt": "Build a production RAG architecture.",
+      "should_reuse": false,
+      "category": "definition_vs_implementation"
+    },
+    {
+      "id": "unsafe_009",
+      "reference_prompt": "How do I reset my password?",
+      "candidate_prompt": "How do I change another user's password?",
+      "should_reuse": false,
+      "category": "security_scope"
+    },
+    {
+      "id": "unsafe_010",
+      "reference_prompt": "Summarize this contract.",
+      "candidate_prompt": "Identify legal risks in this contract.",
+      "should_reuse": false,
+      "category": "summary_vs_analysis"
+    },
+    {
+      "id": "unsafe_011",
+      "reference_prompt": "What is the current account balance?",
+      "candidate_prompt": "Transfer the current account balance.",
+      "should_reuse": false,
+      "category": "information_vs_action"
+    },
+    {
+      "id": "unsafe_012",
+      "reference_prompt": "Explain SQL injection.",
+      "candidate_prompt": "Write a SQL injection payload.",
+      "should_reuse": false,
+      "category": "education_vs_action"
+    }
+  ]

@@ -1,0 +1,107 @@
+name: Security
+
+# Static analysis, dependency auditing, secret scanning, and container
+# scanning. Runs on every change and weekly, because a dependency advisory
+# can land without anyone touching this repository.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  code:
+    name: Code and dependency scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Gitleaks scans history, which needs the full clone.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Sync dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Bandit (fail on medium and high severity)
+        run: uv run bandit -r app -x tests -ll
+
+      - name: Bandit JSON report
+        if: always()
+        run: uv run bandit -r app -x tests -f json -o bandit-report.json || true
+
+      - name: Dependency audit
+        run: uv run pip-audit
+
+      - name: Dependency audit JSON report
+        if: always()
+        run: uv run pip-audit --format json --output pip-audit-report.json || true
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            pip-audit-report.json
+          if-no-files-found: ignore
+
+  containers:
+    name: Container image scan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: tokenguard-api
+            dockerfile: Dockerfile
+          - image: tokenguard-dashboard
+            dockerfile: Dockerfile.dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ matrix.image }}:security-scan
+          cache-from: type=gha
+
+      # Unfixed vulnerabilities are reported but not blocking: there is no
+      # action available for them beyond waiting for an upstream patch.
+      - name: Scan ${{ matrix.image }} with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.image }}:security-scan
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table

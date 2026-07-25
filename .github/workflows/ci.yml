@@ -1,0 +1,162 @@
+name: CI
+
+# Correctness gates: lint, types, migrations, tests, and image buildability.
+# Security scanning lives in security.yml; image publishing lives in docker.yml.
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Sync dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy app
+
+  test:
+    name: Pytest
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: tokenguard_test
+          POSTGRES_USER: tokenguard
+          POSTGRES_PASSWORD: tokenguard_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tokenguard -d tokenguard_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Tests point every dependency at the dedicated test database and a
+      # separate Redis database; tests/conftest.py refuses to run otherwise.
+      DATABASE_URL: postgresql+psycopg://tokenguard:tokenguard_password@localhost:5432/tokenguard_test
+      TEST_DATABASE_URL: postgresql+psycopg://tokenguard:tokenguard_password@localhost:5432/tokenguard_test
+      REDIS_URL: redis://localhost:6379/1
+      TEST_REDIS_URL: redis://localhost:6379/1
+      CELERY_BROKER_URL: redis://localhost:6379/11
+      CELERY_RESULT_BACKEND: redis://localhost:6379/12
+      JWT_SECRET_KEY: ci-test-jwt-secret-key-that-is-long-enough-1234567890abcd
+      TOKEN_GUARD_MASTER_KEY: dGVzdC1vbmx5LWZlcm5ldC1rZXktZm9yLWNpLXRlc3RpbmcxMjM0NT0=
+      ADMIN_API_KEY_HASH: bc89df34c00163be4286bdebff28e39964e3490e369deea3bc9b4a4b8bccdd3e
+      ENVIRONMENT: test
+      DEBUG: "false"
+      # Authorization must be enforced during tests, otherwise the isolation
+      # suites would pass trivially.
+      AUTHENTICATION_ENABLED: "true"
+      REQUIRE_PROJECT_AUTHENTICATION: "true"
+      REQUIRE_ADMIN_AUTHENTICATION: "true"
+      POLICY_ENFORCEMENT_ENABLED: "true"
+      SEMANTIC_CACHE_ENABLED: "false"
+      INPUT_MODERATION_ENABLED: "false"
+      OUTPUT_MODERATION_ENABLED: "false"
+      ENABLE_OPENTELEMETRY: "false"
+      ENABLE_PROMETHEUS_METRICS: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Sync dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Apply migrations to the test database
+        run: uv run alembic upgrade head
+
+      # Fails when a model change has no corresponding migration, which
+      # would otherwise only surface on a production deploy.
+      - name: Check for missing migrations
+        run: uv run alembic check
+
+      - name: Run pytest with coverage
+        run: |
+          uv run pytest -q \
+            --cov=app \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=85
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build only: security.yml owns vulnerability scanning and docker.yml
+      # owns publishing. This job just proves both images still build.
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: tokenguard-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dashboard
+          push: false
+          tags: tokenguard-dashboard:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

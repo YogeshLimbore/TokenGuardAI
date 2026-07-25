@@ -1,0 +1,67 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+test-results/
+
+# Static analysis
+.mypy_cache/
+.ruff_cache/
+bandit-report.json
+pip-audit-report.json
+
+# Load-test output
+load-results*
+soak-results*
+
+# Database backups (they contain hashed credentials and audit data)
+backups/
+*.dump
+*.sql
+*.backup
+
+# Local logs
+*.log
+logs/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local certificates and keys
+certs/
+*.pem
+*.key
+*.crt
+
+# IDE files
+.vscode/
+.idea/
+
+# Operating system files
+.DS_Store
+Thumbs.db
