@@ -1,0 +1,25 @@
+# TokenGuard Free Plan staging baseline.
+# Run with CloudFormation Guard 3.2.0 against cloudformation.yml.
+
+let instances = Resources.*[ Type == 'AWS::EC2::Instance' ]
+let security_groups = Resources.*[ Type == 'AWS::EC2::SecurityGroup' ]
+
+rule ec2_staging_baseline when %instances !empty {
+    %instances.Properties.MetadataOptions.HttpTokens == 'required'
+    %instances.Properties.MetadataOptions.HttpEndpoint == 'enabled'
+    %instances.Properties.MetadataOptions.HttpPutResponseHopLimit == 1
+    %instances.Properties.CreditSpecification.CPUCredits == 'standard'
+    %instances.Properties.BlockDeviceMappings[*].Ebs.Encrypted == true
+    %instances.Properties.BlockDeviceMappings[*].Ebs.DeleteOnTermination == true
+}
+
+rule restricted_ssh when %security_groups !empty {
+    %security_groups.Properties.SecurityGroupIngress[*] {
+        IpProtocol == 'tcp'
+        FromPort == 22
+        ToPort == 22
+        CidrIp.Ref == 'AllowedSshCidr'
+    }
+
+    Parameters.AllowedSshCidr.AllowedPattern == '^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/32$'
+}

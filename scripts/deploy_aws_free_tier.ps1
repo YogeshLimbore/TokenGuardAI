@@ -1,10 +1,7 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)]
-    [ValidatePattern('^[^@\s]+@[^@\s]+\.[^@\s]+$')]
-    [string]$Email,
-
-    [string]$Region = 'ap-south-1',
+    [string]$Profile = 'Tokenguard',
+    [string]$Region = 'ap-southeast-2',
     [string]$StackName = 'tokenguard-free-tier',
     [string]$GitRef = 'codex/production-aws-ready',
     [string]$RepositoryUrl = 'https://github.com/YogeshLimbore/TokenGuardAI.git',
@@ -18,11 +15,13 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $template = Join-Path $repoRoot 'deploy/aws/cloudformation.yml'
 $keyDirectory = Join-Path $repoRoot '.aws-deploy'
 $keyPath = Join-Path $keyDirectory "$KeyName.pem"
+$knownHostsPath = Join-Path $keyDirectory 'known_hosts'
 
 function Invoke-AwsJson {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
-    $output = & aws @Arguments 2>&1
+    $profiledArguments = @($Arguments) + @('--profile', $Profile)
+    $output = & aws @profiledArguments 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw ($output -join [Environment]::NewLine)
     }
@@ -42,8 +41,10 @@ if ([int]$Matches.minor -lt 32) {
     throw "AWS CLI 2.32 or newer is required for browser login and Free-plan verification; found '$versionText'. Update it from an Administrator PowerShell with: aws update"
 }
 
-$identity = Invoke-AwsJson -Arguments @('sts', 'get-caller-identity', '--output', 'json')
+$identity = Invoke-AwsJson -Arguments @('sts', 'get-caller-identity', '--region', $Region, '--output', 'json')
 Write-Host "AWS account: $($identity.Account)"
+Write-Host "AWS profile: $Profile"
+Write-Host "AWS region:  $Region"
 
 # The account-plan API is the only reliable programmatic proof that the new
 # AWS Free plan is active. Refuse to provision when an old CLI or paid account
@@ -71,6 +72,26 @@ if ($AllowedSshCidr -notmatch '^\d{1,3}(?:\.\d{1,3}){3}/32$') {
     throw 'AllowedSshCidr must contain exactly one IPv4 address, for example 203.0.113.8/32.'
 }
 
+$defaultVpcId = Invoke-AwsJson -Arguments @(
+    'ec2', 'describe-vpcs', '--region', $Region,
+    '--filters', 'Name=is-default,Values=true',
+    '--query', 'Vpcs[0].VpcId', '--output', 'json'
+)
+if (-not $defaultVpcId) {
+    throw "No default VPC exists in $Region. This guarded single-host deployment requires the project account's default VPC."
+}
+
+$subnetId = Invoke-AwsJson -Arguments @(
+    'ec2', 'describe-subnets', '--region', $Region,
+    '--filters', "Name=vpc-id,Values=$defaultVpcId", 'Name=default-for-az,Values=true',
+    '--query', 'Subnets[?MapPublicIpOnLaunch].SubnetId | [0]', '--output', 'json'
+)
+if (-not $subnetId) {
+    throw "No public default subnet exists in VPC $defaultVpcId."
+}
+Write-Host "Default VPC:    $defaultVpcId"
+Write-Host "Public subnet: $subnetId"
+
 $keyExists = $true
 try {
     Invoke-AwsJson -Arguments @('ec2', 'describe-key-pairs', '--region', $Region, '--key-names', $KeyName, '--output', 'json') | Out-Null
@@ -80,7 +101,7 @@ try {
 
 if (-not $keyExists) {
     New-Item -ItemType Directory -Force -Path $keyDirectory | Out-Null
-    $keyMaterial = & aws ec2 create-key-pair --region $Region --key-name $KeyName --key-type ed25519 --query KeyMaterial --output text
+    $keyMaterial = & aws ec2 create-key-pair --profile $Profile --region $Region --key-name $KeyName --key-type ed25519 --query KeyMaterial --output text
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create the EC2 key pair.' }
     [System.IO.File]::WriteAllText($keyPath, ($keyMaterial -join [Environment]::NewLine))
     & icacls $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
@@ -91,17 +112,19 @@ if (-not $keyExists) {
 
 Write-Host "Creating stack '$StackName' in $Region. No AWS resources are created before this point."
 & aws cloudformation deploy `
+    --profile $Profile `
     --region $Region `
     --stack-name $StackName `
     --template-file $template `
     --no-fail-on-empty-changeset `
     --parameter-overrides `
+        "VpcId=$defaultVpcId" `
+        "SubnetId=$subnetId" `
         "KeyName=$KeyName" `
         "AllowedSshCidr=$AllowedSshCidr" `
         'InstanceType=t3.small' `
         "RepositoryUrl=$RepositoryUrl" `
-        "GitRef=$GitRef" `
-        "TlsContactEmail=$Email"
+        "GitRef=$GitRef"
 if ($LASTEXITCODE -ne 0) { throw 'CloudFormation deployment failed. Check the stack events and EC2 bootstrap log.' }
 
 $outputs = Invoke-AwsJson -Arguments @(
@@ -111,19 +134,25 @@ $outputs = Invoke-AwsJson -Arguments @(
 $values = @{}
 foreach ($item in $outputs) { $values[$item.OutputKey] = $item.OutputValue }
 
+$sshTarget = "ubuntu@$($values.PublicIp)"
+$sshOptions = @(
+    '-o', 'BatchMode=yes',
+    '-o', 'ConnectTimeout=8',
+    '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', "UserKnownHostsFile=$knownHostsPath",
+    '-i', $keyPath
+)
+
 $ready = $false
-Write-Host 'Waiting for the instance to build the images and obtain HTTPS certificates (up to 25 minutes)...'
+Write-Host 'Waiting for the instance to build the images and pass its local readiness check (up to 30 minutes)...'
 for ($attempt = 1; $attempt -le 100; $attempt++) {
-    try {
-        $response = Invoke-WebRequest -Uri "$($values.ApiUrl)/ready" -TimeoutSec 10 -UseBasicParsing
-        if ($response.StatusCode -eq 200) {
-            $ready = $true
-            break
-        }
-    } catch {
-        if ($attempt % 10 -eq 0) { Write-Host "Still bootstrapping (attempt $attempt/100)..." }
+    $health = & ssh @sshOptions $sshTarget "curl -fsS http://127.0.0.1:8000/ready" 2>$null
+    if ($LASTEXITCODE -eq 0 -and ($health -join '') -match '"status"\s*:\s*"(?:healthy|ok)"') {
+        $ready = $true
+        break
     }
-    Start-Sleep -Seconds 15
+    if ($attempt % 10 -eq 0) { Write-Host "Still bootstrapping (attempt $attempt/100)..." }
+    Start-Sleep -Seconds 18
 }
 
 if (-not $ready) {
@@ -132,8 +161,11 @@ if (-not $ready) {
 }
 
 Write-Host ''
-Write-Host "Dashboard: $($values.DashboardUrl)"
-Write-Host "API:       $($values.ApiUrl)"
+Write-Host 'Start this encrypted tunnel in a separate PowerShell window and leave it running:'
+Write-Host "ssh -N -L 8000:127.0.0.1:8000 -L 8501:127.0.0.1:8501 -i `"$keyPath`" $sshTarget"
+Write-Host ''
+Write-Host "Dashboard after tunnel starts: $($values.DashboardUrl)"
+Write-Host "API after tunnel starts:       $($values.ApiUrl)"
 Write-Host "SSH:       ssh -i `"$keyPath`" ubuntu@$($values.PublicIp)"
 Write-Host ''
 Write-Host 'Create the first administrator with:'

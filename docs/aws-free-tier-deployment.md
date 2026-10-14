@@ -1,6 +1,7 @@
 # AWS Free Tier staging deployment
 
-This deployment runs TokenGuard on one `t3.small` EC2 instance. It is intended
+This deployment runs TokenGuard on one `t3.small` EC2 instance in the AWS Free
+Plan project account. It is intended
 for staging, product demos, and early testing. It is not a highly available
 production topology: the database, cache, API, dashboard, and seven days of
 local backups share one encrypted EBS volume and one failure domain.
@@ -26,11 +27,11 @@ instances, which cannot run this application safely.
 
 ## Architecture and limitations
 
-The default stack contains PostgreSQL, Redis, the API, the Streamlit dashboard,
-and Caddy. Caddy gets public certificates for temporary `sslip.io` hostnames,
-so a paid Route 53 hosted zone is not required. PostgreSQL and Redis have no
-public ports. SSH is restricted to the public `/32` address of the computer
-that runs the deployment script.
+The default stack contains PostgreSQL, Redis, the API, and the Streamlit
+dashboard. No application, database, or cache port is public. The API and
+dashboard bind only to the EC2 loopback interface and are reached through an
+encrypted SSH tunnel. SSH is restricted to the public `/32` address of the
+computer that runs the deployment script.
 
 To fit 2 GiB RAM, the deployment disables embedding-based semantic caching,
 OpenTelemetry, Prometheus/Grafana/Jaeger, and Celery workers. Exact caching,
@@ -45,8 +46,9 @@ across independent infrastructure.
 
 ## Prerequisites
 
-1. Create a new AWS account with the **Free** plan, or use an existing active
-   Free plan account.
+1. Finish AWS Free Plan signup and create a project. A project contains the AWS
+   account in which the stack is deployed. For an Asia Pacific contact address,
+   AWS currently assigns the project account to `ap-southeast-2` (Sydney).
 2. Install a current AWS CLI v2. The CLI must include the command
    `aws freetier get-account-plan-state`.
 3. Authenticate the CLI and verify that `aws sts get-caller-identity` succeeds.
@@ -59,20 +61,28 @@ From PowerShell in the repository root:
 
 ```powershell
 .\scripts\deploy_aws_free_tier.ps1 `
-  -Email you@example.com `
-  -Region ap-south-1 `
+  -Profile Tokenguard `
+  -Region ap-southeast-2 `
   -GitRef codex/production-aws-ready
 ```
 
 The script verifies the AWS Free plan before the first resource mutation. It
 then creates a local EC2 private key under the ignored `.aws-deploy` directory,
-deploys CloudFormation, and waits for the public readiness endpoint. Initial
-image compilation on a `t3.small` can take 10–25 minutes.
+deploys CloudFormation, and checks readiness through restricted SSH. Initial
+image compilation on a `t3.small` can take 10–30 minutes.
 
-The final output contains the HTTPS dashboard and API URLs, plus the SSH
-command used to create the first administrator interactively. The temporary
-`sslip.io` names will change if the instance is stopped and later receives a
-new public IP; update `.env.production` or use your own DNS name in that case.
+The final output contains the SSH tunnel command, local dashboard and API URLs,
+and the SSH command used to create the first administrator interactively. Keep
+the tunnel window open while using TokenGuard:
+
+```powershell
+ssh -N -L 8000:127.0.0.1:8000 -L 8501:127.0.0.1:8501 `
+  -i .\.aws-deploy\tokenguard-free-tier-key.pem ubuntu@PUBLIC_IP
+```
+
+Then open `http://127.0.0.1:8501` for the dashboard or
+`http://127.0.0.1:8000` for the API. The SSH tunnel encrypts traffic between
+your computer and EC2 without exposing either service to the internet.
 
 ## Operate and remove
 
@@ -90,13 +100,13 @@ Delete all provisioned AWS resources when the staging environment is no longer
 needed:
 
 ```powershell
-aws cloudformation delete-stack --region ap-south-1 --stack-name tokenguard-free-tier
-aws cloudformation wait stack-delete-complete --region ap-south-1 --stack-name tokenguard-free-tier
+aws cloudformation delete-stack --profile Tokenguard --region ap-southeast-2 --stack-name tokenguard-free-tier
+aws cloudformation wait stack-delete-complete --profile Tokenguard --region ap-southeast-2 --stack-name tokenguard-free-tier
 ```
 
 The EC2 key pair is separate from the stack. After deletion, remove it from AWS
 and then delete the matching local private key:
 
 ```powershell
-aws ec2 delete-key-pair --region ap-south-1 --key-name tokenguard-free-tier-key
+aws ec2 delete-key-pair --profile Tokenguard --region ap-southeast-2 --key-name tokenguard-free-tier-key
 ```

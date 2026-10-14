@@ -1,8 +1,10 @@
 name: tokenguard
 
-# Lean single-host deployment for an AWS Free Tier staging environment.
-# This intentionally omits the observability stack and keeps Celery workers
-# behind a profile so the default stack can run on a 2 GiB t3.small.
+# Lean single-host deployment for an AWS Free Plan staging environment.
+# The API and dashboard bind only to the EC2 loopback interface and are
+# reached through an encrypted SSH tunnel. PostgreSQL and Redis never publish
+# a host port. Celery stays behind a profile so the default stack can run on a
+# 2 GiB t3.small.
 
 services:
   postgres:
@@ -74,6 +76,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)\""]
       interval: 15s
@@ -99,30 +103,17 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    ports:
+      - "127.0.0.1:8501:8501"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
     networks: [frontend]
     mem_limit: 320m
     cpus: 0.5
-    logging: *logging
-
-  reverse-proxy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    environment:
-      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN is required}
-      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN is required}
-      TLS_CONTACT_EMAIL: ${TLS_CONTACT_EMAIL:?TLS_CONTACT_EMAIL is required}
-    depends_on:
-      api:
-        condition: service_healthy
-    networks: [frontend]
-    mem_limit: 96m
     logging: *logging
 
   worker:
@@ -175,5 +166,3 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  caddy_data:
-  caddy_config:

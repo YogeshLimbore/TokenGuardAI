@@ -1,7 +1,26 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: TokenGuard AI single-host Free Tier staging deployment
+Description: TokenGuard AI Free Plan staging host with SSH-tunneled access and no public application ports
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: single EC2 host -> Docker Compose API + dashboard + PostgreSQL + Redis
+    must:
+      - Free Plan status ACTIVE and credit floor verified before stack mutation
+      - app ports stay on host loopback; admin access only from one IPv4 /32
+    ref:
+      - at: docs/aws-free-tier-deployment.md
+        has: deployment, access, backup, and deletion procedures
+        scope: stack
 
 Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Default VPC selected by the guarded deployment script
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public default subnet selected by the guarded deployment script
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: EC2 key pair used for emergency SSH access
@@ -21,9 +40,6 @@ Parameters:
     Type: String
     Default: codex/production-aws-ready
     AllowedPattern: "^[A-Za-z0-9._/-]+$"
-  TlsContactEmail:
-    Type: String
-    AllowedPattern: "^[^@ ]+@[^@ ]+\\.[^@ ]+$"
   UbuntuAmi:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
@@ -31,44 +47,54 @@ Parameters:
 Resources:
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: limits host entry to administrator SSH; app traffic uses SSH local forwarding
+        must:
+          - never add public API, dashboard, database, or cache ingress
+          - SSH source remains one trusted IPv4 /32
+          - VPC matches the instance subnet
+        mutable: change-with-constraints
     Properties:
-      GroupDescription: TokenGuard public HTTPS and restricted SSH
+      GroupDescription: TokenGuard restricted administrator SSH
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
           CidrIp: !Ref AllowedSshCidr
           Description: Restricted administrator SSH
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: ACME and HTTPS redirect
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: Public HTTPS
       SecurityGroupEgress:
         - IpProtocol: "-1"
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: tokenguard-free-tier
+          Value: !Sub "${AWS::StackName}-host"
         - Key: Project
           Value: TokenGuardAI
 
   Instance:
     Type: AWS::EC2::Instance
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: low-cost single host for demos and early validation; local data services avoid managed-service baseline cost
+        must:
+          - IMDSv2 required with hop limit 1 because containers do not need instance metadata
+          - encrypted root volume deletes with the staging host
+          - burst credits stay in standard mode to prevent surplus credit charges
+        mutable: review-required
     Properties:
       ImageId: !Ref UbuntuAmi
       InstanceType: !Ref InstanceType
       KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
       SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
       MetadataOptions:
         HttpEndpoint: enabled
         HttpTokens: required
         HttpPutResponseHopLimit: 1
+      CreditSpecification:
+        CPUCredits: standard
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -78,7 +104,7 @@ Resources:
             DeleteOnTermination: true
       Tags:
         - Key: Name
-          Value: tokenguard-free-tier
+          Value: !Sub "${AWS::StackName}-host"
         - Key: Project
           Value: TokenGuardAI
       UserData:
@@ -107,10 +133,6 @@ Resources:
           git clone --branch '${GitRef}' --depth 1 '${RepositoryUrl}' /opt/tokenguard/app
           cd /opt/tokenguard/app
 
-          TOKEN=$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' http://169.254.169.254/latest/api/token)
-          PUBLIC_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
-          API_DOMAIN="api.$PUBLIC_IP.sslip.io"
-          DASHBOARD_DOMAIN="app.$PUBLIC_IP.sslip.io"
           POSTGRES_PASSWORD=$(openssl rand -hex 32)
           REDIS_PASSWORD=$(openssl rand -hex 32)
           JWT_SECRET_KEY=$(openssl rand -base64 64 | tr -d '\n')
@@ -125,11 +147,8 @@ Resources:
           LOG_LEVEL=INFO
           LOG_FORMAT=json
           ENABLE_DOCS=false
-          API_DOMAIN=$API_DOMAIN
-          DASHBOARD_DOMAIN=$DASHBOARD_DOMAIN
-          TLS_CONTACT_EMAIL=${TlsContactEmail}
-          ALLOWED_HOSTS=$API_DOMAIN,api,127.0.0.1
-          CORS_ALLOWED_ORIGINS=https://$DASHBOARD_DOMAIN
+          ALLOWED_HOSTS=localhost,127.0.0.1,api
+          CORS_ALLOWED_ORIGINS=http://localhost:8501,http://127.0.0.1:8501
           FORCE_HTTPS_REDIRECT=false
           POSTGRES_DB=tokenguard
           POSTGRES_USER=tokenguard
@@ -153,7 +172,7 @@ Resources:
           PII_DEFAULT_ACTION=redact
           OUTPUT_SECRET_SCAN_ENABLED=true
           STORE_RAW_SECURITY_CONTENT=false
-          ENABLE_PROMETHEUS_METRICS=true
+          ENABLE_PROMETHEUS_METRICS=false
           ENABLE_OPENTELEMETRY=false
           SEMANTIC_CACHE_ENABLED=false
           OPENROUTER_API_KEY=
@@ -205,11 +224,19 @@ Resources:
 Outputs:
   InstanceId:
     Value: !Ref Instance
+    Description: EC2 instance running the TokenGuard staging stack
   PublicIp:
     Value: !GetAtt Instance.PublicIp
+    Description: Public IPv4 address used only for restricted SSH access
   ApiUrl:
-    Value: !Sub "https://api.${Instance.PublicIp}.sslip.io"
+    Value: http://127.0.0.1:8000
+    Description: API URL after starting the SSH tunnel
   DashboardUrl:
-    Value: !Sub "https://app.${Instance.PublicIp}.sslip.io"
+    Value: http://127.0.0.1:8501
+    Description: Dashboard URL after starting the SSH tunnel
   SshCommand:
     Value: !Sub "ssh -i <private-key.pem> ubuntu@${Instance.PublicIp}"
+    Description: Template for an administrator SSH session
+  SshTunnelCommand:
+    Value: !Sub "ssh -N -L 8000:127.0.0.1:8000 -L 8501:127.0.0.1:8501 -i <private-key.pem> ubuntu@${Instance.PublicIp}"
+    Description: Template for encrypted local access to the API and dashboard
