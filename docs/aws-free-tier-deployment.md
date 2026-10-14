@@ -61,7 +61,7 @@ From PowerShell in the repository root:
 .\scripts\deploy_aws_free_tier.ps1 `
   -Email you@example.com `
   -Region ap-south-1 `
-  -GitRef main
+  -GitRef codex/production-aws-ready
 ```
 
 The script verifies the AWS Free plan before the first resource mutation. It

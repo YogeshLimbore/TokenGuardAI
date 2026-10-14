@@ -6,7 +6,7 @@ param(
 
     [string]$Region = 'ap-south-1',
     [string]$StackName = 'tokenguard-free-tier',
-    [string]$GitRef = 'main',
+    [string]$GitRef = 'codex/production-aws-ready',
     [string]$RepositoryUrl = 'https://github.com/YogeshLimbore/TokenGuardAI.git',
     [string]$AllowedSshCidr,
     [string]$KeyName = 'tokenguard-free-tier-key'

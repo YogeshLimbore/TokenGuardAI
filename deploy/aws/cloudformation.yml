@@ -19,7 +19,7 @@ Parameters:
     Default: https://github.com/YogeshLimbore/TokenGuardAI.git
   GitRef:
     Type: String
-    Default: main
+    Default: codex/production-aws-ready
     AllowedPattern: "^[A-Za-z0-9._/-]+$"
   TlsContactEmail:
     Type: String
