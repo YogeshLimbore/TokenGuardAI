@@ -44,6 +44,10 @@
 		}
 	}
 
+	# Metrics stay on the internal backend network for Prometheus.
+	@private_metrics path /metrics
+	respond @private_metrics 404
+
 	reverse_proxy api:8000
 
 	encode zstd gzip

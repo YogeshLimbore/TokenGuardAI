@@ -220,12 +220,36 @@ def test_admin_cannot_modify_owner_membership(db_session: Session, client: TestC
     )
     assert remove_res.status_code == status.HTTP_403_FORBIDDEN
 
-    # But the owner can modify their own membership's role freely -- more
-    # importantly, another owner can manage the first owner. Verify the
-    # endpoint itself isn't just universally broken for owners.
     owner_token, _ = jwt_svc.create_access_token(user_id=owner.id)
     list_res = client.get(
         f"/v1/organizations/{org.id}/members",
         headers={"Authorization": f"Bearer {owner_token}"},
     )
     assert list_res.status_code == status.HTTP_200_OK
+
+    # Even an owner cannot remove the final active owner.
+    last_owner_res = client.patch(
+        f"/v1/organizations/{org.id}/members/{owner_membership.id}",
+        json={"role": "viewer"},
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert last_owner_res.status_code == status.HTTP_409_CONFLICT
+
+    second_owner = identity_svc.create_user(
+        db_session,
+        email="secondowner@example.com",
+        display_name="Second Owner",
+        password="ValidPassword123!",
+    )
+    org_svc.add_member(
+        db_session,
+        organization_id=org.id,
+        user_id=second_owner.id,
+        role="owner",
+    )
+    demote_with_successor = client.patch(
+        f"/v1/organizations/{org.id}/members/{owner_membership.id}",
+        json={"role": "viewer"},
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert demote_with_successor.status_code == status.HTTP_200_OK

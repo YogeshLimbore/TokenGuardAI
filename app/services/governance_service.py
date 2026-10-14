@@ -206,10 +206,15 @@ class GovernanceService:
         ``event_type`` rather than the generic governance one.
         """
 
-        if not (
-            self.settings.input_moderation_enabled and self.settings.openai_api_key
-        ):
+        if not self.settings.input_moderation_enabled:
             return GovernanceCheckResult(safe=True)
+        if not self.settings.openai_api_key:
+            return GovernanceCheckResult(
+                safe=not self.settings.moderation_fail_closed,
+                event_type="moderation_unavailable",
+                severity="high",
+                detected_categories=["moderation_not_configured"],
+            )
 
         combined_text = "\n".join(message.content for message in messages)
 
@@ -219,10 +224,12 @@ class GovernanceService:
                 api_key=self.settings.openai_api_key,
             )
         except Exception:
-            # Moderation is a best-effort safety net. An outage of
-            # the moderation provider must not make chat completions
-            # unavailable.
-            return GovernanceCheckResult(safe=True)
+            return GovernanceCheckResult(
+                safe=not self.settings.moderation_fail_closed,
+                event_type="moderation_unavailable",
+                severity="high",
+                detected_categories=["moderation_unavailable"],
+            )
 
         if not moderation_result.flagged:
             return GovernanceCheckResult(safe=True)
@@ -262,10 +269,15 @@ class GovernanceService:
                     detected_categories=list(secret_scan.findings),
                 )
 
-        if not (
-            self.settings.output_moderation_enabled and self.settings.openai_api_key
-        ):
+        if not self.settings.output_moderation_enabled:
             return GovernanceCheckResult(safe=True)
+        if not self.settings.openai_api_key:
+            return GovernanceCheckResult(
+                safe=not self.settings.moderation_fail_closed,
+                event_type="moderation_unavailable",
+                severity="high",
+                detected_categories=["moderation_not_configured"],
+            )
 
         try:
             moderation_result = await self.moderation.moderate(
@@ -273,7 +285,12 @@ class GovernanceService:
                 api_key=self.settings.openai_api_key,
             )
         except Exception:
-            return GovernanceCheckResult(safe=True)
+            return GovernanceCheckResult(
+                safe=not self.settings.moderation_fail_closed,
+                event_type="moderation_unavailable",
+                severity="high",
+                detected_categories=["moderation_unavailable"],
+            )
 
         if not moderation_result.flagged:
             return GovernanceCheckResult(safe=True)

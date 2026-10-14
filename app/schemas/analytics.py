@@ -38,8 +38,7 @@ class AnalyticsSummaryResponse(BaseModel):
     cache: CacheStatistics
     estimated_cost_saved_usd: float = Field(
         description=(
-            "Estimated direct provider cost avoided. This remains zero "
-            "while only local Ollama models are used."
+            "Estimated provider cost avoided by exact and semantic cache hits."
         )
     )
 

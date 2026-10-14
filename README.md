@@ -44,7 +44,9 @@ black box.
 Python 3.13 · FastAPI · SQLAlchemy · PostgreSQL · Redis · Celery · Alembic ·
 Streamlit · Prometheus · Grafana · OpenTelemetry · Docker · [uv](https://github.com/astral-sh/uv)
 
-Providers: Ollama (local), OpenRouter, OpenAI, Anthropic, Groq.
+Built-in providers: Ollama, OpenRouter, OpenAI, Anthropic, Groq, Gemini,
+DeepSeek, Mistral, Together, Fireworks, xAI, and Perplexity. Operators can add
+other HTTPS OpenAI-compatible endpoints with `PROVIDER_CONFIGS`.
 
 ## Quick start
 
@@ -96,17 +98,17 @@ therefore the database.
 
 ### Create the first administrator
 
-```bash
-# temporarily in .env
-BOOTSTRAP_ADMIN_EMAIL=admin@example.com
-BOOTSTRAP_ADMIN_PASSWORD=<long-random-password>
+Run the one-time command in an interactive terminal. The password is read with
+hidden input and is never placed in the environment or command history:
 
-docker compose exec api uv run python scripts/bootstrap_admin.py
+```bash
+docker compose exec api uv run --no-sync python scripts/bootstrap_admin.py \
+  --email admin@example.com
 ```
 
-Then clear `BOOTSTRAP_ADMIN_PASSWORD` and restart the API. From there, create
-an organization, a project, and a project API key — see the
-[API guide](docs/api-guide.md).
+The bootstrap account is trusted as email-verified. It can provision additional
+verified users through `POST /v1/auth/users`. From there, create an organization,
+a project, and a scoped project API key — see the [API guide](docs/api-guide.md).
 
 ### Try it with demo data
 

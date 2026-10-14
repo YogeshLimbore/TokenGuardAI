@@ -32,8 +32,8 @@ on:
         default: main
         type: string
       image_tag:
-        description: Image tag to deploy (e.g. 1.5.0). Leave blank to keep the tag already in .env.production.
-        required: false
+        description: Immutable image tag produced for git_ref (for example sha-abc1234 or 1.5.0)
+        required: true
         type: string
 
 permissions:
@@ -75,7 +75,7 @@ jobs:
             'bash -euo pipefail -s' <<'REMOTE'
           cd "$DEPLOY_PATH"
 
-          COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+          COMPOSE="docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml"
 
           # A migration that goes wrong is only recoverable if the backup was
           # taken first, so this runs before anything else touches the schema.
@@ -92,23 +92,31 @@ jobs:
 
           echo "==> Fetching $GIT_REF"
           git fetch --all --tags --prune
-          git checkout "$GIT_REF"
-          git pull --ff-only || echo "Detached tag checkout; skipping pull."
+          TARGET_SHA="$(git rev-parse "origin/$GIT_REF^{commit}" 2>/dev/null || git rev-parse "$GIT_REF^{commit}")"
+          git checkout --detach "$TARGET_SHA"
 
-          if [ -n "$IMAGE_TAG" ]; then
-            echo "==> Pinning images to $IMAGE_TAG"
-            sed -i "s|^TOKEN_GUARD_API_IMAGE=.*|TOKEN_GUARD_API_IMAGE=ghcr.io/${REPOSITORY}/api:${IMAGE_TAG}|" .env.production
-            sed -i "s|^TOKEN_GUARD_DASHBOARD_IMAGE=.*|TOKEN_GUARD_DASHBOARD_IMAGE=ghcr.io/${REPOSITORY}/dashboard:${IMAGE_TAG}|" .env.production
-          fi
+          API_IMAGE="ghcr.io/${REPOSITORY}/api:${IMAGE_TAG}"
+          DASHBOARD_IMAGE="ghcr.io/${REPOSITORY}/dashboard:${IMAGE_TAG}"
+          echo "==> Pinning images to $IMAGE_TAG"
+          sed -i "s|^TOKEN_GUARD_API_IMAGE=.*|TOKEN_GUARD_API_IMAGE=${API_IMAGE}|" .env.production
+          sed -i "s|^TOKEN_GUARD_DASHBOARD_IMAGE=.*|TOKEN_GUARD_DASHBOARD_IMAGE=${DASHBOARD_IMAGE}|" .env.production
 
           echo "==> Pulling images"
           $COMPOSE pull
+
+          for IMAGE in "$API_IMAGE" "$DASHBOARD_IMAGE"; do
+            IMAGE_SHA="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")"
+            if [ "$IMAGE_SHA" != "$TARGET_SHA" ]; then
+              echo "Image $IMAGE was built from $IMAGE_SHA, expected $TARGET_SHA" >&2
+              exit 1
+            fi
+          done
 
           echo "==> Starting data services"
           $COMPOSE up -d postgres redis
 
           echo "==> Running migrations"
-          $COMPOSE run --rm api uv run alembic upgrade head
+          $COMPOSE run --rm api uv run --no-sync alembic upgrade head
 
           echo "==> Starting application services"
           $COMPOSE up -d
@@ -122,7 +130,7 @@ jobs:
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
         run: |
           for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error --max-time 10 "${API_BASE_URL}/health"; then
+            if curl --fail --silent --show-error --max-time 10 "${API_BASE_URL}/ready"; then
               echo ""
               echo "Health check passed on attempt ${attempt}."
               exit 0

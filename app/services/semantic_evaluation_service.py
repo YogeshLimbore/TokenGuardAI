@@ -44,7 +44,17 @@ class SemanticEvaluationService:
         dataset_path: str = ("evaluation/semantic_cache_dataset.json"),
     ) -> None:
         self.settings = get_settings()
-        self.dataset_path = Path(dataset_path)
+        evaluation_root = Path("evaluation").resolve()
+        requested_path = Path(dataset_path)
+        try:
+            self.dataset_path = requested_path.resolve(strict=True)
+            self.dataset_path.relative_to(evaluation_root)
+        except (OSError, ValueError) as error:
+            raise EvaluationDatasetError(
+                "Evaluation dataset must be an existing file under evaluation/."
+            ) from error
+        if not self.dataset_path.is_file():
+            raise EvaluationDatasetError("Evaluation dataset must be a regular file.")
         self.embedding_model = get_embedding_model()
 
     def load_dataset(
@@ -54,6 +64,11 @@ class SemanticEvaluationService:
             raise EvaluationDatasetError(
                 f"Evaluation dataset was not found: {self.dataset_path}"
             )
+        if (
+            self.dataset_path.stat().st_size
+            > self.settings.maximum_evaluation_dataset_bytes
+        ):
+            raise EvaluationDatasetError("The evaluation dataset is too large.")
 
         try:
             with self.dataset_path.open(
@@ -68,6 +83,10 @@ class SemanticEvaluationService:
 
         if not isinstance(raw_examples, list):
             raise EvaluationDatasetError("The evaluation dataset must be a JSON array.")
+        if len(raw_examples) > self.settings.maximum_evaluation_examples:
+            raise EvaluationDatasetError(
+                "The evaluation dataset has too many examples."
+            )
 
         examples: list[EvaluationExample] = []
 
@@ -95,7 +114,7 @@ class SemanticEvaluationService:
                     id=str(raw_example["id"]),
                     reference_prompt=str(raw_example["reference_prompt"]).strip(),
                     candidate_prompt=str(raw_example["candidate_prompt"]).strip(),
-                    should_reuse=bool(raw_example["should_reuse"]),
+                    should_reuse=_strict_bool(raw_example["should_reuse"]),
                     category=str(raw_example["category"]).strip(),
                 )
             )
@@ -385,3 +404,9 @@ class SemanticEvaluationService:
             threshold_results=threshold_results,
             pair_results=pair_results,
         )
+
+
+def _strict_bool(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise EvaluationDatasetError("should_reuse must be a JSON boolean.")
+    return value

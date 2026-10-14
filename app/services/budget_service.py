@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from app.database.models import (
     BudgetDecisionLog,
     LLMRequestLog,
     Project,
+    UsageReservation,
 )
 from app.services.pricing_service import PricingService
 
@@ -193,17 +194,26 @@ class BudgetService:
                 0.0,
             ),
         ).where(
-            LLMRequestLog.provider == provider,
             LLMRequestLog.project_id == project_id,
-            LLMRequestLog.status == "completed",
+            ~select(UsageReservation.id)
+            .where(UsageReservation.request_id == LLMRequestLog.request_id)
+            .exists(),
             LLMRequestLog.created_at >= self._start_of_today_utc(),
         )
 
         row = database.execute(statement).one()
 
-        return (
-            int(row[0] or 0),
-            float(row[1] or 0.0),
+        reserved = database.execute(
+            select(
+                func.coalesce(func.sum(UsageReservation.total_tokens), 0),
+                func.coalesce(func.sum(UsageReservation.estimated_cost_usd), 0.0),
+            ).where(
+                UsageReservation.project_id == project_id,
+                UsageReservation.created_at >= self._start_of_today_utc(),
+            )
+        ).one()
+        return int(row[0] or 0) + int(reserved[0] or 0), float(row[1] or 0) + float(
+            reserved[1] or 0
         )
 
     def evaluate(
@@ -219,8 +229,13 @@ class BudgetService:
         request_maximum_cost_usd: float | None,
         request_maximum_total_tokens: int | None,
         allow_downgrade: bool,
+        persist: bool = True,
     ) -> InternalBudgetDecision:
         policy = self._provider_policy(provider)
+        global_policy = self.policy.get("global", {})
+        for field in ("daily_token_budget", "daily_cost_budget_usd"):
+            if isinstance(global_policy, dict) and field in global_policy:
+                policy[field] = global_policy[field]
 
         maximum_input_tokens = _policy_int(
             policy,
@@ -312,6 +327,8 @@ class BudgetService:
             model=model,
             input_tokens=estimated_input_tokens,
             output_tokens=requested_output_tokens,
+            database=database,
+            project_id=project.id,
         )
 
         daily_tokens_used, daily_cost_used = self.get_daily_usage(
@@ -335,6 +352,11 @@ class BudgetService:
         if estimated_total_tokens > maximum_total_tokens:
             reasons.append("Estimated total tokens exceed the per-request token limit.")
 
+        hard_violation = bool(reasons)
+        if not estimated_cost.pricing_found and provider != "ollama":
+            reasons.append("Model pricing is required for paid providers.")
+            hard_violation = True
+
         if (
             estimated_cost.pricing_found
             and estimated_cost.total_cost_usd > maximum_cost
@@ -342,13 +364,14 @@ class BudgetService:
             reasons.append("Estimated request cost exceeds the per-request cost limit.")
 
         if daily_tokens_used + estimated_total_tokens > daily_token_budget:
-            reasons.append("The provider daily token budget would be exceeded.")
+            reasons.append("The project daily token budget would be exceeded.")
+            hard_violation = True
 
         if (
             estimated_cost.pricing_found
             and daily_cost_used + estimated_cost.total_cost_usd > daily_cost_budget
         ):
-            reasons.append("The provider daily cost budget would be exceeded.")
+            reasons.append("The project daily cost budget would be exceeded.")
 
         final_provider = provider
         final_model = model
@@ -379,6 +402,7 @@ class BudgetService:
 
             if (
                 allow_downgrade
+                and not hard_violation
                 and downgrade_enabled
                 and isinstance(
                     downgrade_route,
@@ -389,12 +413,41 @@ class BudgetService:
 
                 final_model = str(downgrade_route["model"])
 
-                action = "downgrade"
-                allowed = True
-
-                reasons.append(
-                    f"The request was downgraded to {final_provider}/{final_model}."
+                destination = self.evaluate(
+                    database,
+                    project=project,
+                    request_id=request_id,
+                    provider=final_provider,
+                    model=final_model,
+                    estimated_input_tokens=estimated_input_tokens,
+                    requested_output_tokens=requested_output_tokens,
+                    request_maximum_cost_usd=request_maximum_cost_usd,
+                    request_maximum_total_tokens=request_maximum_total_tokens,
+                    allow_downgrade=False,
+                    persist=False,
                 )
+                if destination.allowed:
+                    decision = replace(
+                        destination,
+                        original_provider=provider,
+                        original_model=model,
+                        action="downgrade",
+                        reasons=[
+                            *reasons,
+                            f"The request was downgraded to {final_provider}/{final_model}.",
+                        ],
+                    )
+                    if persist:
+                        self.log_decision(
+                            database,
+                            project_id=project.id,
+                            request_id=request_id,
+                            decision=decision,
+                        )
+                    return decision
+                action = "reject"
+                allowed = False
+                reasons.extend(destination.reasons)
 
             else:
                 action = "reject"
@@ -423,12 +476,20 @@ class BudgetService:
             reasons=(reasons or ["The request is within budget."]),
         )
 
-        self.log_decision(
-            database,
-            project_id=project.id,
-            request_id=request_id,
-            decision=decision,
-        )
+        if not self.settings.budget_enforcement_enabled:
+            decision = replace(
+                decision,
+                allowed=True,
+                action="allow",
+                reasons=["Budget enforcement is disabled."],
+            )
+        if persist:
+            self.log_decision(
+                database,
+                project_id=project.id,
+                request_id=request_id,
+                decision=decision,
+            )
 
         return decision
 

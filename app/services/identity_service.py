@@ -17,8 +17,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -33,6 +34,12 @@ from app.services.token_service_jwt import (
     JWTService,
     TokenPair,
 )
+
+
+@lru_cache(maxsize=1)
+def _dummy_password_hash() -> str:
+    return PasswordService().hash_password("not-a-real-user-password")
+
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +121,7 @@ class IdentityService:
         display_name: str,
         password: str,
         is_platform_admin: bool = False,
+        is_email_verified: bool = False,
     ) -> User:
         """
         Create and persist a new user.
@@ -126,12 +134,19 @@ class IdentityService:
             display_name=display_name.strip(),
             password_hash=self.password_service.hash_password(password),
             is_active=True,
-            is_email_verified=False,
+            is_email_verified=is_email_verified,
             is_platform_admin=is_platform_admin,
         )
 
         try:
             database.add(user)
+            database.flush()
+            self._record_audit_event(
+                database,
+                event_type="user_created",
+                succeeded=True,
+                user_id=user.id,
+            )
             database.commit()
             database.refresh(user)
             return user
@@ -166,7 +181,7 @@ class IdentityService:
             # Keep timing consistent with a real password check.
             self.password_service.verify_password(
                 password,
-                "$argon2id$v=19$m=65536,t=3,p=4$placeholder$placeholder",
+                _dummy_password_hash(),
             )
             raise InvalidCredentialsError("Invalid email or password.")
 
@@ -204,7 +219,9 @@ class IdentityService:
         user.locked_until = None
         user.last_login_at = now
 
-        token_pair = self.jwt_service.create_token_pair(user_id=user.id)
+        token_pair = self.jwt_service.create_token_pair(
+            user_id=user.id, session_version=user.session_version
+        )
 
         refresh_record = RefreshToken(
             token_id=token_pair.refresh_token_id,
@@ -226,6 +243,77 @@ class IdentityService:
 
         return user, token_pair
 
+    def change_password(
+        self,
+        database: Session,
+        *,
+        user_id: int,
+        current_password: str,
+        new_password: str,
+    ) -> None:
+        user = database.scalar(select(User).where(User.id == user_id).with_for_update())
+        if user is None or not self.password_service.verify_password(
+            current_password, user.password_hash
+        ):
+            raise InvalidCredentialsError("Current password is incorrect.")
+        user.password_hash = self.password_service.hash_password(new_password)
+        user.password_changed_at = datetime.now(UTC)
+        user.session_version += 1
+        database.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=user.password_changed_at)
+        )
+        self._record_audit_event(
+            database,
+            event_type="password_changed",
+            succeeded=True,
+            user_id=user.id,
+        )
+        database.commit()
+
+    @staticmethod
+    def list_sessions(database: Session, *, user_id: int) -> list[RefreshToken]:
+        return list(
+            database.scalars(
+                select(RefreshToken)
+                .where(RefreshToken.user_id == user_id)
+                .order_by(RefreshToken.created_at.desc())
+            )
+        )
+
+    def revoke_sessions(
+        self,
+        database: Session,
+        *,
+        user_id: int,
+        token_id: str | None = None,
+    ) -> bool:
+        statement = select(RefreshToken).where(RefreshToken.user_id == user_id)
+        if token_id is not None:
+            statement = statement.where(RefreshToken.token_id == token_id)
+        records = list(database.scalars(statement.with_for_update()))
+        if token_id is not None and not records:
+            return False
+        now = datetime.now(UTC)
+        for record in records:
+            if record.revoked_at is None:
+                record.revoked_at = now
+        if token_id is None:
+            user = database.scalar(
+                select(User).where(User.id == user_id).with_for_update()
+            )
+            if user is not None:
+                user.session_version += 1
+        self._record_audit_event(
+            database,
+            event_type="sessions_revoked",
+            succeeded=True,
+            user_id=user_id,
+        )
+        database.commit()
+        return True
+
     # ------------------------------------------------------------------
     # Refresh-token rotation
     # ------------------------------------------------------------------
@@ -245,10 +333,30 @@ class IdentityService:
         """
         token_hash = self.jwt_service.hash_refresh_token(plaintext_refresh_token)
 
-        statement = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        statement = (
+            select(RefreshToken)
+            .where(RefreshToken.token_hash == token_hash)
+            .with_for_update()
+        )
         record = database.scalar(statement)
 
         now = datetime.now(UTC)
+
+        if record is not None and record.revoked_at is not None:
+            # Conservative replay response: revoke all of this user's sessions.
+            database.execute(
+                update(RefreshToken)
+                .where(RefreshToken.user_id == record.user_id)
+                .values(revoked_at=now)
+            )
+            self._record_audit_event(
+                database,
+                event_type="refresh_replay_detected",
+                succeeded=False,
+                user_id=record.user_id,
+            )
+            database.commit()
+            raise RefreshTokenInvalidError("Refresh token is invalid.")
 
         if (
             record is None
@@ -262,7 +370,9 @@ class IdentityService:
         if user is None or not user.is_active:
             raise RefreshTokenInvalidError("Refresh token is invalid.")
 
-        new_pair = self.jwt_service.create_token_pair(user_id=user.id)
+        new_pair = self.jwt_service.create_token_pair(
+            user_id=user.id, session_version=user.session_version
+        )
 
         # Revoke old record.
         record.revoked_at = now
@@ -306,7 +416,11 @@ class IdentityService:
         """
         token_hash = self.jwt_service.hash_refresh_token(plaintext_refresh_token)
 
-        statement = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        statement = (
+            select(RefreshToken)
+            .where(RefreshToken.token_hash == token_hash)
+            .with_for_update()
+        )
         record = database.scalar(statement)
 
         if record is None:

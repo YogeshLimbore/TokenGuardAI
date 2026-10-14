@@ -45,12 +45,24 @@ jobs:
         if: always()
         run: uv run bandit -r app -x tests -f json -o bandit-report.json || true
 
-      - name: Dependency audit
-        run: uv run pip-audit
+      - name: Export runtime dependencies
+        run: |
+          uv export --quiet --frozen --no-dev --no-emit-project --no-hashes --output-file api-requirements.txt
+          uv export --quiet --frozen --only-group dashboard --no-emit-project --no-hashes --output-file dashboard-requirements.txt
 
-      - name: Dependency audit JSON report
+      - name: API dependency audit
+        run: >-
+          uv run pip-audit --requirement api-requirements.txt
+          --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Dashboard dependency audit
+        run: uv run pip-audit --requirement dashboard-requirements.txt
+
+      - name: Dependency audit JSON reports
         if: always()
-        run: uv run pip-audit --format json --output pip-audit-report.json || true
+        run: |
+          uv run pip-audit --requirement api-requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu --format json --output api-pip-audit-report.json || true
+          uv run pip-audit --requirement dashboard-requirements.txt --format json --output dashboard-pip-audit-report.json || true
 
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
@@ -65,7 +77,8 @@ jobs:
           name: security-reports
           path: |
             bandit-report.json
-            pip-audit-report.json
+            api-pip-audit-report.json
+            dashboard-pip-audit-report.json
           if-no-files-found: ignore
 
   containers:

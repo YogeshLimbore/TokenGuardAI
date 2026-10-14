@@ -61,6 +61,7 @@ class JWTService:
         self,
         *,
         user_id: int,
+        session_version: int = 1,
     ) -> tuple[str, datetime]:
         """
         Return a signed access token and its expiry datetime.
@@ -81,6 +82,7 @@ class JWTService:
             "exp": expires_at,
             "iss": self.settings.jwt_issuer,
             "aud": self.settings.jwt_audience,
+            "ver": session_version,
         }
 
         token = jwt.encode(
@@ -157,9 +159,12 @@ class JWTService:
         self,
         *,
         user_id: int,
+        session_version: int = 1,
     ) -> TokenPair:
         """Create and return a new access + refresh token pair."""
-        access_token, access_expires = self.create_access_token(user_id=user_id)
+        access_token, access_expires = self.create_access_token(
+            user_id=user_id, session_version=session_version
+        )
 
         (
             refresh_token,

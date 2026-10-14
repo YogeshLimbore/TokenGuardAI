@@ -34,6 +34,10 @@ class MemberAlreadyExistsError(ValueError):
     """Raised when a user is already a member of the organization."""
 
 
+class LastOwnerError(ValueError):
+    """Raised when a change would leave an organization without an owner."""
+
+
 class OrganizationService:
     """Manages organization lifecycle and membership operations."""
 
@@ -221,11 +225,24 @@ class OrganizationService:
         Raises:
             MembershipNotFoundError: if the record does not exist.
         """
+        self._lock_organization(database, organization_id)
         membership = self.get_membership(
             database,
             organization_id=organization_id,
             membership_id=membership_id,
         )
+
+        would_remove_owner = (
+            membership.role == "owner"
+            and membership.is_active
+            and (role not in {None, "owner"} or is_active is False)
+        )
+        if would_remove_owner:
+            self._require_another_owner(
+                database,
+                organization_id=organization_id,
+                excluding_membership_id=membership.id,
+            )
 
         if role is not None:
             membership.role = role
@@ -250,11 +267,49 @@ class OrganizationService:
         Raises:
             MembershipNotFoundError: if the record does not exist.
         """
+        self._lock_organization(database, organization_id)
         membership = self.get_membership(
             database,
             organization_id=organization_id,
             membership_id=membership_id,
         )
 
+        if membership.role == "owner" and membership.is_active:
+            self._require_another_owner(
+                database,
+                organization_id=organization_id,
+                excluding_membership_id=membership.id,
+            )
+
         membership.is_active = False
         database.commit()
+
+    @staticmethod
+    def _lock_organization(database: Session, organization_id: int) -> None:
+        organization = database.scalar(
+            select(Organization)
+            .where(Organization.id == organization_id)
+            .with_for_update()
+        )
+        if organization is None:
+            raise OrganizationNotFoundError("Organization was not found.")
+
+    @staticmethod
+    def _require_another_owner(
+        database: Session,
+        *,
+        organization_id: int,
+        excluding_membership_id: int,
+    ) -> None:
+        another_owner = database.scalar(
+            select(OrganizationMembership.id).where(
+                OrganizationMembership.organization_id == organization_id,
+                OrganizationMembership.id != excluding_membership_id,
+                OrganizationMembership.role == "owner",
+                OrganizationMembership.is_active.is_(True),
+            )
+        )
+        if another_owner is None:
+            raise LastOwnerError(
+                "Assign another active owner before changing this membership."
+            )

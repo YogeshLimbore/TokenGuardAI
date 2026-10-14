@@ -125,10 +125,9 @@ class AnalyticsService:
         # -----------------------------------------------------
         # Cache savings
         #
-        # Every cache record stores the tokens used by the
-        # original generation. Each hit avoids that amount.
-        # Exact-match and semantic-match caches are combined
-        # into a single set of savings statistics.
+        # Savings are recorded on each immutable request log at hit time.
+        # This remains correct when cache entries expire, are refreshed, or
+        # are purged after the request was served.
         # -----------------------------------------------------
 
         exact_cache_savings_statement = select(
@@ -187,9 +186,14 @@ class AnalyticsService:
             semantic_cache_savings_statement
         ).one()
 
-        tokens_avoided = int(exact_cache_savings.tokens_avoided or 0) + int(
-            semantic_cache_savings.tokens_avoided or 0
-        )
+        log_savings = database.execute(
+            select(
+                func.coalesce(func.sum(LLMRequestLog.tokens_avoided), 0),
+                func.coalesce(func.sum(LLMRequestLog.cost_avoided_usd), 0.0),
+            ).where(LLMRequestLog.project_id == project_id)
+        ).one()
+        tokens_avoided = int(log_savings[0] or 0)
+        cost_avoided_usd = float(log_savings[1] or 0.0)
 
         total_potential_tokens = actual_tokens_consumed + tokens_avoided
 
@@ -296,8 +300,7 @@ class AnalyticsService:
                 total_cache_hits=total_cache_hits,
                 most_used_cache_entry_hits=(most_used_cache_entry_hits),
             ),
-            # Ollama is local, so direct API cost savings are zero.
-            estimated_cost_saved_usd=0.0,
+            estimated_cost_saved_usd=round(cost_avoided_usd, 10),
         )
 
     def get_provider_usage(

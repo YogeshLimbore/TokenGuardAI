@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -5,7 +6,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.database.connection import Base
-from app.database.models import ProviderAttemptLog
+from app.database.models import Project, ProviderAttemptLog
 from app.providers.base import ProviderResponse
 from app.providers.openrouter import OpenRouterProviderError
 from app.schemas.chat import ChatMessage
@@ -24,6 +25,9 @@ def db_session():
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
 
+    session.add(Project(id=1, name="Fallback Test Project"))
+    session.commit()
+
     yield session
 
     session.close()
@@ -31,6 +35,7 @@ def db_session():
 
 def test_build_attempts_ollama(db_session: Session):
     service = FallbackService()
+    service.settings.allow_local_fallback = True
 
     attempts = service.build_attempts(
         db_session,
@@ -69,6 +74,7 @@ def test_build_attempts_with_default_and_backup(db_session: Session):
     )
 
     service = FallbackService()
+    service.settings.allow_local_fallback = True
 
     attempts = service.build_attempts(
         db_session,
@@ -239,3 +245,60 @@ async def test_execute_all_failed(db_session: Session):
 
     assert "All provider attempts failed." in str(exc_info.value)
     assert len(exc_info.value.errors) == 1
+
+
+@pytest.mark.anyio
+async def test_timeout_is_logged_and_falls_back(monkeypatch):
+    service = FallbackService()
+    monkeypatch.setattr(service.settings, "request_timeout_seconds", 0.001)
+    monkeypatch.setattr(service.settings, "provider_retry_enabled", False)
+
+    slow_provider = AsyncMock()
+
+    async def slow_generate(**kwargs):
+        await asyncio.sleep(0.02)
+
+    slow_provider.generate.side_effect = slow_generate
+    backup_provider = AsyncMock()
+    backup_provider.generate.return_value = ProviderResponse(
+        content="backup response",
+        model="llama3.2",
+        input_tokens=2,
+        output_tokens=3,
+    )
+    attempts = [
+        ProviderAttempt("openrouter", "openai/gpt-4.1-mini", 1, "default", "key"),
+        ProviderAttempt("ollama", "llama3.2", None, "fallback_local", None),
+    ]
+
+    with (
+        patch(
+            "app.services.fallback_service.ProviderFactory.create",
+            side_effect=[slow_provider, backup_provider],
+        ),
+        patch("app.services.fallback_service.ModelPolicyService.enforce_model_access"),
+        patch(
+            "app.services.fallback_service.AdmissionService.reserve",
+            return_value=object(),
+        ),
+        patch("app.services.fallback_service.AdmissionService.settle"),
+        patch.object(service, "_ensure_circuit_available"),
+        patch.object(service, "_record_circuit_failure"),
+        patch.object(service, "_record_circuit_success"),
+        patch.object(service, "_log_attempt") as log_attempt,
+        patch.object(service.health_service, "record_event"),
+    ):
+        result = await service.execute(
+            None,
+            project_id=1,
+            request_id="timeout-fallback",
+            attempts=attempts,
+            messages=[ChatMessage(role="user", content="Hello")],
+            temperature=0.0,
+            max_tokens=10,
+        )
+
+    assert result.provider == "ollama"
+    assert result.fallback_used is True
+    assert log_attempt.call_count == 2
+    assert log_attempt.call_args_list[0].kwargs["succeeded"] is False

@@ -66,8 +66,10 @@ def _create_project_and_key(client: TestClient) -> str:
     return key_response.json()["api_key"]
 
 
-def _make_fake_provider(events):
+def _make_fake_provider(events, *, delay_seconds: float = 0):
     async def fake_stream(**_kwargs):
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
         for event in events:
             yield event
 
@@ -174,7 +176,7 @@ def test_stream_event_ordering_and_usage_totals(client):
     )
 
     with patch(
-        "app.api.streaming.ProviderFactory.create",
+        "app.services.fallback_service.ProviderFactory.create",
         return_value=fake_provider,
     ):
         response = test_client.post(
@@ -190,13 +192,10 @@ def test_stream_event_ordering_and_usage_totals(client):
 
     assert event_names[0] == "metadata"
     assert event_names[-1] == "completed"
-    assert event_names.count("token") == 2
+    assert event_names.count("token") == 1
 
     token_events = [data for name, data in events if name == "token"]
-    assert [event["content"] for event in token_events] == [
-        "Hello",
-        " world",
-    ]
+    assert [event["content"] for event in token_events] == ["Hello world"]
 
     usage_event = next(data for name, data in events if name == "usage")
     assert usage_event["input_tokens"] == 5
@@ -208,7 +207,7 @@ def test_stream_event_ordering_and_usage_totals(client):
         log = database.scalar(select(LLMRequestLog))
         assert log is not None
         assert log.status == "completed"
-        assert log.response == "Hello world"
+        assert log.response is None
 
 
 def test_provider_failure_before_first_token_emits_error_event(
@@ -222,7 +221,7 @@ def test_provider_failure_before_first_token_emits_error_event(
     )
 
     with patch(
-        "app.api.streaming.ProviderFactory.create",
+        "app.services.fallback_service.ProviderFactory.create",
         return_value=failing_provider,
     ):
         response = test_client.post(
@@ -256,16 +255,16 @@ def test_partial_response_is_not_cached(client):
     test_client, SessionLocal = client
     api_key = _create_project_and_key(test_client)
 
-    # The provider sends one token, then fails. Because a token
-    # already reached the client, TokenGuard must not fall back to
-    # another provider, and must not cache the partial content.
+    # The provider sends one upstream token, then fails. TokenGuard buffers
+    # the stream until output policy checks pass, so partial content is never
+    # exposed to the client or written to the cache.
     failing_provider = _make_failing_provider(
         OllamaProviderError("Ollama connection dropped."),
         tokens_before_error=["Partial"],
     )
 
     with patch(
-        "app.api.streaming.ProviderFactory.create",
+        "app.services.fallback_service.ProviderFactory.create",
         return_value=failing_provider,
     ):
         response = test_client.post(
@@ -279,7 +278,7 @@ def test_partial_response_is_not_cached(client):
     events = _parse_sse_events(response.text)
     event_names = [name for name, _ in events]
 
-    assert event_names.count("token") == 1
+    assert event_names.count("token") == 0
     assert "error" in event_names
     assert "completed" not in event_names
 
@@ -323,7 +322,8 @@ def test_client_disconnect_stops_generation(client, monkeypatch):
                 event_type="completed",
                 model="llama3.2",
             ),
-        ]
+        ],
+        delay_seconds=2,
     )
 
     call_count = {"value": 0}
@@ -332,7 +332,7 @@ def test_client_disconnect_stops_generation(client, monkeypatch):
         call_count["value"] += 1
         # Report "connected" for the first token, then
         # "disconnected" for everything afterwards.
-        return call_count["value"] > 1
+        return call_count["value"] > 0
 
     monkeypatch.setattr(
         "starlette.requests.Request.is_disconnected",
@@ -340,7 +340,7 @@ def test_client_disconnect_stops_generation(client, monkeypatch):
     )
 
     with patch(
-        "app.api.streaming.ProviderFactory.create",
+        "app.services.fallback_service.ProviderFactory.create",
         return_value=fake_provider,
     ):
         response = test_client.post(
@@ -364,7 +364,7 @@ def test_client_disconnect_stops_generation(client, monkeypatch):
 
         log = database.scalar(select(LLMRequestLog))
         assert log is not None
-        assert log.status == "disconnected"
+        assert log.status == "cancelled"
 
 
 @pytest.mark.anyio

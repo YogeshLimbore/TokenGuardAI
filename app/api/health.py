@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -86,3 +86,21 @@ async def health_check(
         database=database_health,
         redis=redis_health,
     )
+
+
+@router.get("/live")
+async def liveness_check() -> dict[str, str]:
+    """Process liveness; dependency state is deliberately excluded."""
+    return {"status": "alive"}
+
+
+@router.get("/ready", response_model=DetailedHealthResponse)
+async def readiness_check(
+    response: Response,
+    database: Session = Depends(get_database_session),
+) -> DetailedHealthResponse:
+    """Return 503 until both required runtime dependencies are reachable."""
+    result = await health_check(database)
+    if result.status != "healthy":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return result

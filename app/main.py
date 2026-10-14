@@ -21,6 +21,7 @@ from app.api.projects import router as projects_router
 from app.api.provider_health import (
     router as provider_health_router,
 )
+from app.api.providers import router as providers_router
 from app.api.security_audit import (
     router as security_audit_router,
 )
@@ -37,6 +38,7 @@ from app.middleware.correlation_id import (
 from app.middleware.metrics import (
     PrometheusMetricsMiddleware,
 )
+from app.middleware.request_limits import RequestLimitsMiddleware
 from app.middleware.security_headers import (
     SecurityHeadersMiddleware,
 )
@@ -96,6 +98,7 @@ app = FastAPI(
 )
 
 # Middleware order: last added runs first on the request path.
+app.add_middleware(RequestLimitsMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CorrelationIDMiddleware)
 app.add_middleware(PrometheusMetricsMiddleware)
@@ -110,6 +113,7 @@ if settings.cors_origins_list:
             "Authorization",
             "Content-Type",
             "X-TokenGuard-Key",
+            "X-TokenGuard-Project-ID",
             "X-TokenGuard-Admin-Key",
             "X-Correlation-ID",
             "X-Request-ID",
@@ -139,6 +143,7 @@ app.include_router(analytics_router)
 app.include_router(credentials_router)
 app.include_router(evaluation_router)
 app.include_router(projects_router)
+app.include_router(providers_router)
 app.include_router(metrics_router)
 app.include_router(provider_health_router)
 app.include_router(streaming_router)

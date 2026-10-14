@@ -17,6 +17,8 @@ services:
   postgres:
     ports: !override []
     environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tokenguard}
+      POSTGRES_USER: ${POSTGRES_USER:-tokenguard}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     networks: !override [backend]
 
@@ -52,7 +54,7 @@ services:
       DEBUG: "false"
       ENABLE_DOCS: "false"
       FORCE_HTTPS_REDIRECT: ${FORCE_HTTPS_REDIRECT:-false}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?ALLOWED_HOSTS is required}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?ALLOWED_HOSTS is required},api,127.0.0.1
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
@@ -61,12 +63,18 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)"
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 40s
     networks: !override [backend, frontend]
+    mem_limit: ${API_MEMORY_LIMIT:-2g}
+    cpus: ${API_CPU_LIMIT:-2.0}
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   worker:
     build: !reset null
@@ -81,6 +89,12 @@ services:
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
     networks: !override [backend]
+    mem_limit: ${WORKER_MEMORY_LIMIT:-4g}
+    cpus: ${WORKER_CPU_LIMIT:-2.0}
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   beat:
     build: !reset null
@@ -95,6 +109,8 @@ services:
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
     networks: !override [backend]
+    mem_limit: ${BEAT_MEMORY_LIMIT:-512m}
+    cpus: ${BEAT_CPU_LIMIT:-0.5}
 
   dashboard:
     build: !reset null
@@ -112,6 +128,12 @@ services:
       api:
         condition: service_healthy
     networks: !override [backend, frontend]
+    mem_limit: ${DASHBOARD_MEMORY_LIMIT:-1g}
+    cpus: ${DASHBOARD_CPU_LIMIT:-1.0}
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # Terminates TLS and is the only service with published ports. Caddy
   # obtains and renews certificates automatically once DNS points here and

@@ -32,6 +32,12 @@ if (-not (Test-Path $DumpPath)) {
     throw "Dump file not found: $DumpPath"
 }
 
+if ($TargetDatabase -notmatch '^tokenguard_restore_test(?:_[A-Za-z0-9]+)?$') {
+    throw "TargetDatabase must be a dedicated scratch name beginning with 'tokenguard_restore_test'."
+}
+
+$DumpPath = (Resolve-Path -LiteralPath $DumpPath).Path
+
 $containerId = (docker compose ps -q $Service).Trim()
 
 if (-not $containerId) {
@@ -43,30 +49,34 @@ $containerPath = "/tmp/restore-validation.dump"
 function Invoke-Psql {
     param([string]$Sql, [string]$Database = $TargetDatabase)
 
-    return (
+    $output = (
         docker compose exec -T $Service psql `
-            -U $User -d $Database -t -A -c $Sql
+            -v ON_ERROR_STOP=1 -U $User -d $Database -t -A -c $Sql
     )
+    if ($LASTEXITCODE -ne 0) {
+        throw "psql validation command failed."
+    }
+    return $output
 }
 
 Write-Host "Copying dump into the container..."
 docker cp $DumpPath "${containerId}:${containerPath}"
+if ($LASTEXITCODE -ne 0) { throw "Could not copy the dump into the container." }
 
 Write-Host "Recreating $TargetDatabase..."
 docker compose exec -T $Service dropdb -U $User --if-exists $TargetDatabase
+if ($LASTEXITCODE -ne 0) { throw "Could not remove the previous scratch database." }
 docker compose exec -T $Service createdb -U $User $TargetDatabase
+if ($LASTEXITCODE -ne 0) { throw "Could not create the scratch database." }
 
 Write-Host "Restoring..."
 docker compose exec -T $Service pg_restore `
     -U $User `
     -d $TargetDatabase `
-    --clean `
-    --if-exists `
+    --exit-on-error `
     --no-owner `
     $containerPath
-
-# pg_restore exits non-zero on benign "does not exist" notices from
-# --clean, so validate the result rather than trusting the exit code.
+if ($LASTEXITCODE -ne 0) { throw "pg_restore failed; the backup was not validated." }
 
 Write-Host ""
 Write-Host "Validating restored data..." -ForegroundColor Cyan
@@ -84,6 +94,9 @@ $checks = [ordered]@{
 
 foreach ($name in $checks.Keys) {
     $value = (Invoke-Psql -Sql $checks[$name]).Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "Restore validation returned no value for '$name'."
+    }
     Write-Host ("  {0,-22} {1}" -f $name, $value)
 }
 

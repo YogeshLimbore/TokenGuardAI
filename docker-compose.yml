@@ -62,7 +62,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)"
       interval: 15s
       timeout: 5s
       retries: 10
@@ -82,6 +82,7 @@ services:
     command:
       - uv
       - run
+      - --no-sync
       - celery
       - -A
       - app.workers.celery_app:celery_app
@@ -111,6 +112,7 @@ services:
     command:
       - uv
       - run
+      - --no-sync
       - celery
       - -A
       - app.workers.celery_app:celery_app

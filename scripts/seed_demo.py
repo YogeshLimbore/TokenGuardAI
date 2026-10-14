@@ -19,6 +19,7 @@ import random
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypedDict
 
 project_root = Path(__file__).resolve().parent.parent
 
@@ -78,7 +79,17 @@ DEMO_MODELS = [
     ("openrouter", "anthropic/claude-3.5-haiku", 0.000_26),
 ]
 
-DEMO_SECURITY_EVENTS = [
+
+class DemoSecurityEvent(TypedDict):
+    event_type: str
+    severity: str
+    action: str
+    categories: list[str]
+    summary: str
+    risk_score: float | None
+
+
+DEMO_SECURITY_EVENTS: list[DemoSecurityEvent] = [
     {
         "event_type": "governance_input_blocked",
         "severity": "high",
@@ -367,7 +378,7 @@ def _seed_security_events(
                 action=str(event["action"]),
                 provider="openrouter",
                 model="openai/gpt-4.1-mini",
-                risk_score=event["risk_score"],  # type: ignore[arg-type]
+                risk_score=event["risk_score"],
                 detected_categories_json=json.dumps(event["categories"]),
                 # Only a sanitized summary is stored; the demo deliberately
                 # mirrors production behaviour of never keeping raw content.

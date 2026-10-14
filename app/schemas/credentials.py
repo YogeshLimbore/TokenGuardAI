@@ -1,15 +1,11 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import AfterValidator, BaseModel, Field, SecretStr, field_validator
 
-SupportedProvider = Literal[
-    "openrouter",
-    "openai",
-    "anthropic",
-    "gemini",
-    "groq",
-]
+from app.providers.registry import validate_provider
+
+SupportedProvider = Annotated[str, AfterValidator(validate_provider)]
 
 
 class CredentialCreateRequest(BaseModel):

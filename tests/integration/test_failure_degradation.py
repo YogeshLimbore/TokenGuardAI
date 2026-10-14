@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.database.models import (
     ExactResponseCache,
     Project,
@@ -237,7 +238,9 @@ def test_openrouter_outage_falls_back_to_local_ollama(
     client: TestClient,
     database: Session,
     project_and_key: tuple[Project, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(get_settings(), "allow_local_fallback", True)
     project, api_key = project_and_key
 
     credential_response = client.post(
@@ -305,7 +308,9 @@ def test_total_provider_outage_returns_503_and_caches_nothing(
     client: TestClient,
     database: Session,
     project_and_key: tuple[Project, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(get_settings(), "allow_local_fallback", True)
     project, api_key = project_and_key
 
     client.post(

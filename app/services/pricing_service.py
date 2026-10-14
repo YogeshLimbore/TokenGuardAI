@@ -2,7 +2,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import case, select
+from sqlalchemy.orm import Session
+
 from app.core.config import get_settings
+from app.database.models import ProjectModelPrice
 
 
 class PricingConfigurationError(Exception):
@@ -28,6 +32,13 @@ class PricingService:
         settings = get_settings()
         self.pricing_file = Path(settings.model_pricing_file)
         self._pricing = self._load_pricing()
+        for provider, models in settings.provider_pricing.items():
+            provider_prices = self._pricing.setdefault(provider, {})
+            if not isinstance(provider_prices, dict):
+                raise PricingConfigurationError(
+                    f"Pricing for provider '{provider}' must be an object."
+                )
+            provider_prices.update(models)
 
     def _load_pricing(self) -> dict[str, object]:
         if not self.pricing_file.exists():
@@ -49,11 +60,51 @@ class PricingService:
 
         return data
 
+    def provider_has_pricing(
+        self,
+        provider: str,
+        *,
+        database: Session | None = None,
+        project_id: int | None = None,
+    ) -> bool:
+        if database is not None and project_id is not None:
+            project_price = database.scalar(
+                select(ProjectModelPrice.id).where(
+                    ProjectModelPrice.project_id == project_id,
+                    ProjectModelPrice.provider == provider.lower(),
+                    ProjectModelPrice.is_active.is_(True),
+                )
+            )
+            if project_price is not None:
+                return True
+        prices = self._pricing.get(provider.lower())
+        return isinstance(prices, dict) and bool(prices)
+
     def get_model_price(
         self,
         provider: str,
         model: str,
+        *,
+        database: Session | None = None,
+        project_id: int | None = None,
     ) -> ModelPrice | None:
+        if database is not None and project_id is not None:
+            project_price = database.scalar(
+                select(ProjectModelPrice)
+                .where(
+                    ProjectModelPrice.project_id == project_id,
+                    ProjectModelPrice.provider == provider.lower(),
+                    ProjectModelPrice.model.in_([model, "*"]),
+                    ProjectModelPrice.is_active.is_(True),
+                )
+                .order_by(case((ProjectModelPrice.model == model, 0), else_=1))
+                .limit(1)
+            )
+            if project_price is not None:
+                return ModelPrice(
+                    input_usd_per_1m_tokens=project_price.input_usd_per_1m_tokens,
+                    output_usd_per_1m_tokens=project_price.output_usd_per_1m_tokens,
+                )
         provider_prices = self._pricing.get(provider.lower())
 
         if not isinstance(provider_prices, dict):
@@ -79,10 +130,14 @@ class PricingService:
         model: str,
         input_tokens: int,
         output_tokens: int,
+        database: Session | None = None,
+        project_id: int | None = None,
     ) -> CostBreakdown:
         price = self.get_model_price(
             provider=provider,
             model=model,
+            database=database,
+            project_id=project_id,
         )
 
         if price is None:

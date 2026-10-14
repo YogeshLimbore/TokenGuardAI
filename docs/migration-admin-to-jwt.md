@@ -17,9 +17,11 @@ emergency recovery but should not be the primary human authentication path.
 
 1. Bootstrap a platform admin:
    ```bash
-   uv run python scripts/bootstrap_admin.py
+   uv run python scripts/bootstrap_admin.py --email admin@example.com
    ```
-2. Remove `BOOTSTRAP_ADMIN_PASSWORD` from the environment.
+   Enter the initial password at the hidden prompts. In automation, use a
+   short-lived mounted file with `--password-file`.
+2. Remove any bootstrap password file or secret mount.
 3. Log in via `POST /v1/auth/login` and store the refresh token securely.
 4. Create an organization (`POST /v1/organizations`).
 5. Create projects under that organization:

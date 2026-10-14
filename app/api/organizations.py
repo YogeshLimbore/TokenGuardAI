@@ -1,5 +1,4 @@
-"""
-Organization and member management API.
+"""Organization and member management API.
 
 Endpoints:
     POST   /v1/organizations
@@ -17,6 +16,8 @@ Endpoints:
     GET    /v1/organizations/{organization_id}/projects/{project_id}
 """
 
+import json
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -26,12 +27,19 @@ from fastapi import (
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.projects import project_to_response
+from app.api.projects import (
+    create_project_api_key,
+    list_project_api_keys,
+    project_to_response,
+    revoke_project_api_key,
+    update_project,
+)
 from app.database.connection import get_database_session
 from app.database.models import (
     Organization,
     OrganizationMembership,
     Project,
+    ProjectGovernancePolicy,
     User,
 )
 from app.dependencies.authorization import (
@@ -40,6 +48,11 @@ from app.dependencies.authorization import (
     require_permission,
 )
 from app.dependencies.user_authentication import get_current_user
+from app.observability.context import get_correlation_id
+from app.schemas.governance import (
+    ProjectGovernancePolicyRequest,
+    ProjectGovernancePolicyResponse,
+)
 from app.schemas.identity import (
     MembershipCreateRequest,
     MembershipResponse,
@@ -49,11 +62,21 @@ from app.schemas.identity import (
     OrganizationUpdateRequest,
 )
 from app.schemas.projects import (
+    ProjectAPIKeyCreateRequest,
+    ProjectAPIKeyCreateResponse,
+    ProjectAPIKeyResponse,
+    ProjectAPIKeyRevokeResponse,
     ProjectCreateRequest,
     ProjectResponse,
+    ProjectUpdateRequest,
 )
 from app.security.permissions import Permission
+from app.services.model_policy_service import (
+    GovernancePolicyConfigurationError,
+    ModelPolicyService,
+)
 from app.services.organization_service import (
+    LastOwnerError,
     MemberAlreadyExistsError,
     MembershipNotFoundError,
     OrganizationService,
@@ -63,6 +86,7 @@ from app.services.project_service import (
     DuplicateProjectError,
     ProjectService,
 )
+from app.services.security_audit_service import SecurityAuditService
 
 
 def get_organization_project(
@@ -284,6 +308,14 @@ async def add_member(
     access: OrganizationAccess = Depends(require_permission(Permission.MEMBERS_MANAGE)),
     database: Session = Depends(get_database_session),
 ) -> MembershipResponse:
+    if (
+        request.role == "owner"
+        and access.membership.role != "owner"
+        and not access.user.is_platform_admin
+    ):
+        raise HTTPException(
+            status_code=403, detail="Only an owner can assign the owner role."
+        )
     # Look up the target user by email.
     target_user = database.scalar(
         select(User).where(User.email == request.email.lower())
@@ -328,6 +360,14 @@ async def update_member(
     service = OrganizationService()
 
     _guard_owner_membership(access, service, database, membership_id)
+    if (
+        request.role == "owner"
+        and access.membership.role != "owner"
+        and not access.user.is_platform_admin
+    ):
+        raise HTTPException(
+            status_code=403, detail="Only an owner can assign the owner role."
+        )
 
     try:
         membership = service.update_membership(
@@ -341,6 +381,10 @@ async def update_member(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
+        ) from error
+    except LastOwnerError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from error
 
     member_user = database.get(User, membership.user_id)
@@ -378,6 +422,10 @@ async def remove_member(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(error),
+        ) from error
+    except LastOwnerError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(error)
         ) from error
 
 
@@ -459,3 +507,215 @@ async def get_single_organization_project(
     )
 
     return project_to_response(project)
+
+
+@router.patch(
+    "/{organization_id}/projects/{project_id}", response_model=ProjectResponse
+)
+async def update_organization_project(
+    project_id: int,
+    request: ProjectUpdateRequest,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.PROJECTS_UPDATE)
+    ),
+    database: Session = Depends(get_database_session),
+) -> ProjectResponse:
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    return await update_project(project_id, request, database)
+
+
+@router.post(
+    "/{organization_id}/projects/{project_id}/api-keys",
+    response_model=ProjectAPIKeyCreateResponse,
+    status_code=201,
+)
+async def issue_organization_key(
+    project_id: int,
+    request: ProjectAPIKeyCreateRequest,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.PROJECT_KEYS_MANAGE)
+    ),
+    database: Session = Depends(get_database_session),
+) -> ProjectAPIKeyCreateResponse:
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    return await create_project_api_key(project_id, request, database)
+
+
+@router.get(
+    "/{organization_id}/projects/{project_id}/api-keys",
+    response_model=list[ProjectAPIKeyResponse],
+)
+async def list_organization_keys(
+    project_id: int,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.PROJECT_KEYS_MANAGE)
+    ),
+    database: Session = Depends(get_database_session),
+) -> list[ProjectAPIKeyResponse]:
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    return await list_project_api_keys(project_id, database)
+
+
+@router.delete(
+    "/{organization_id}/projects/{project_id}/api-keys/{key_id}",
+    response_model=ProjectAPIKeyRevokeResponse,
+)
+async def revoke_organization_key(
+    project_id: int,
+    key_id: int,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.PROJECT_KEYS_MANAGE)
+    ),
+    database: Session = Depends(get_database_session),
+) -> ProjectAPIKeyRevokeResponse:
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    return await revoke_project_api_key(project_id, key_id, database)
+
+
+@router.delete("/{organization_id}/projects/{project_id}/cache", status_code=204)
+def purge_project_cache(
+    project_id: int,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.GOVERNANCE_MANAGE)
+    ),
+    database: Session = Depends(get_database_session),
+) -> None:
+    from sqlalchemy import delete
+
+    from app.cache.redis_client import get_redis_client
+    from app.database.models import ExactResponseCache, SemanticResponseCache
+    from app.services.redis_cache_service import RedisExactCacheService
+
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    RedisExactCacheService(get_redis_client()).delete_project_cache(
+        project_id=project_id
+    )
+    database.execute(
+        delete(ExactResponseCache).where(ExactResponseCache.project_id == project_id)
+    )
+    database.execute(
+        delete(SemanticResponseCache).where(
+            SemanticResponseCache.project_id == project_id
+        )
+    )
+    database.commit()
+
+
+@router.get(
+    "/{organization_id}/projects/{project_id}/governance-policy",
+    response_model=ProjectGovernancePolicyResponse,
+)
+def get_project_governance_policy(
+    project_id: int,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.GOVERNANCE_READ)
+    ),
+    database: Session = Depends(get_database_session),
+) -> ProjectGovernancePolicyResponse:
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    stored = database.scalar(
+        select(ProjectGovernancePolicy).where(
+            ProjectGovernancePolicy.project_id == project_id
+        )
+    )
+    return ProjectGovernancePolicyResponse(
+        project_id=project_id,
+        is_active=bool(stored and stored.is_active),
+        policy=json.loads(stored.policy_json) if stored else {},
+    )
+
+
+@router.put(
+    "/{organization_id}/projects/{project_id}/governance-policy",
+    response_model=ProjectGovernancePolicyResponse,
+)
+def set_project_governance_policy(
+    project_id: int,
+    request: ProjectGovernancePolicyRequest,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.GOVERNANCE_MANAGE)
+    ),
+    database: Session = Depends(get_database_session),
+) -> ProjectGovernancePolicyResponse:
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    try:
+        policy = ModelPolicyService.validate_project_policy(request.policy)
+    except GovernancePolicyConfigurationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    stored = database.scalar(
+        select(ProjectGovernancePolicy)
+        .where(ProjectGovernancePolicy.project_id == project_id)
+        .with_for_update()
+    )
+    if stored is None:
+        stored = ProjectGovernancePolicy(
+            project_id=project_id,
+            policy_json=json.dumps(policy, sort_keys=True),
+            is_active=True,
+        )
+        database.add(stored)
+    else:
+        stored.policy_json = json.dumps(policy, sort_keys=True)
+        stored.is_active = True
+    database.commit()
+    SecurityAuditService.record(
+        database,
+        project_id=project_id,
+        request_id=None,
+        correlation_id=get_correlation_id(),
+        event_type="governance_policy_updated",
+        severity="info",
+        action="update",
+        metadata={"actor_user_id": access.user.id},
+    )
+    return ProjectGovernancePolicyResponse(
+        project_id=project_id, is_active=True, policy=policy
+    )
+
+
+@router.delete(
+    "/{organization_id}/projects/{project_id}/governance-policy",
+    status_code=204,
+)
+def disable_project_governance_policy(
+    project_id: int,
+    access: OrganizationAccess = Depends(
+        require_permission(Permission.GOVERNANCE_MANAGE)
+    ),
+    database: Session = Depends(get_database_session),
+) -> None:
+    get_organization_project(
+        database, organization_id=access.organization.id, project_id=project_id
+    )
+    stored = database.scalar(
+        select(ProjectGovernancePolicy)
+        .where(ProjectGovernancePolicy.project_id == project_id)
+        .with_for_update()
+    )
+    if stored is not None:
+        stored.is_active = False
+        database.commit()
+    SecurityAuditService.record(
+        database,
+        project_id=project_id,
+        request_id=None,
+        correlation_id=get_correlation_id(),
+        event_type="governance_policy_disabled",
+        severity="info",
+        action="disable",
+        metadata={"actor_user_id": access.user.id},
+    )

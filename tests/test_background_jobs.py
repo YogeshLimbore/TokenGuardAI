@@ -64,7 +64,10 @@ def _create_project_and_key(client: TestClient, name: str) -> str:
 
     key_response = client.post(
         f"/v1/projects/{project_id}/api-keys",
-        json={"name": f"{name}-key"},
+        json={
+            "name": f"{name}-key",
+            "scopes": ["jobs:create", "jobs:read", "jobs:cancel"],
+        },
     )
     assert key_response.status_code == 201
 

@@ -109,7 +109,16 @@ def test_complete_project_workflow(
 
     key_response = admin_client.post(
         f"/v1/projects/{project_id}/api-keys",
-        json={"name": "E2E Key", "expires_at": None},
+        json={
+            "name": "E2E Key",
+            "expires_at": None,
+            "scopes": [
+                "chat",
+                "credentials:read",
+                "credentials:manage",
+                "analytics:read",
+            ],
+        },
     )
 
     assert key_response.status_code == 201

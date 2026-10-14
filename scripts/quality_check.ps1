@@ -64,16 +64,31 @@ Invoke-Step "1. Ruff lint" { uv run ruff check . }
 
 Invoke-Step "2. Ruff formatting" { uv run ruff format --check . }
 
-Invoke-Step "3. Type checking" { uv run mypy app }
+Invoke-Step "3. Type checking" { uv run mypy app dashboard scripts }
 
 Invoke-Step "4. Static security scan" {
     uv run bandit -r app -x tests -ll
 }
 
-Invoke-Step "5. Dependency audit" { uv run pip-audit }
+Invoke-Step "5. API dependency audit" {
+    $requirements = Join-Path $env:TEMP "tokenguard-api-requirements.txt"
+    uv export --quiet --frozen --no-dev --no-emit-project --no-hashes `
+        --output-file $requirements
+    if ($LASTEXITCODE -ne 0) { return }
+    uv run pip-audit --requirement $requirements `
+        --extra-index-url https://download.pytorch.org/whl/cpu
+}
+
+Invoke-Step "6. Dashboard dependency audit" {
+    $requirements = Join-Path $env:TEMP "tokenguard-dashboard-requirements.txt"
+    uv export --quiet --frozen --only-group dashboard --no-emit-project --no-hashes `
+        --output-file $requirements
+    if ($LASTEXITCODE -ne 0) { return }
+    uv run pip-audit --requirement $requirements
+}
 
 if (-not $SkipTests) {
-    Invoke-Step "6. Tests and coverage" {
+    Invoke-Step "7. Tests and coverage" {
         uv run pytest `
             --cov=app `
             --cov-branch `
@@ -86,10 +101,10 @@ if (-not $SkipTests) {
 if (-not $SkipMigrationCheck) {
     # Catches a model change that has no corresponding migration, which
     # would otherwise only surface during a deployment.
-    Invoke-Step "7. Migration drift" { uv run alembic check }
+    Invoke-Step "8. Migration drift" { uv run alembic check }
 }
 
-Invoke-Step "8. Release files" {
+Invoke-Step "9. Release files" {
     uv run python scripts/verify_release.py
 }
 

@@ -6,6 +6,14 @@ from typing import Literal
 from app.schemas.chat import ChatMessage
 
 
+class ProviderError(RuntimeError):
+    """Sanitized provider failure retaining machine-readable retry status."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 @dataclass
 class ProviderResponse:
     content: str

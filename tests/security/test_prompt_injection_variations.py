@@ -1,12 +1,4 @@
-"""
-Prompt-injection detector coverage and its documented blind spots.
-
-The detector is a regex-and-score heuristic, so it is one layer among
-several (model allow-lists, output secret scanning, budget caps, audit
-trails) rather than a complete defence. The ``xfail`` cases below record
-bypasses we knowingly do not catch today; if detection improves they turn
-into XPASS rather than breaking the build.
-"""
+"""Prompt-injection detector coverage, including obfuscated variants."""
 
 from __future__ import annotations
 
@@ -72,15 +64,7 @@ def test_detector_flags_known_injection_phrasings(prompt: str) -> None:
 
 
 @pytest.mark.parametrize("prompt", KNOWN_BYPASSES)
-@pytest.mark.xfail(
-    reason=(
-        "Known limitation: the detector normalizes case and whitespace "
-        "only, so obfuscated variants pass. Layered controls (model "
-        "allow-lists, output secret scanning, audit logging) remain."
-    ),
-    strict=False,
-)
-def test_detector_known_bypasses(prompt: str) -> None:
+def test_detector_flags_obfuscated_variations(prompt: str) -> None:
     result = PromptInjectionService().analyze(prompt)
 
     assert result.score > 0

@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: TokenGuard AI single-host Free Tier staging deployment
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair used for emergency SSH access
+  AllowedSshCidr:
+    Type: String
+    Description: One trusted public IPv4 address in CIDR form, for example 203.0.113.8/32
+    AllowedPattern: "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/32$"
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small]
+    Description: Kept to t3.small because this template targets the Free Tier staging profile
+  RepositoryUrl:
+    Type: String
+    Default: https://github.com/YogeshLimbore/TokenGuardAI.git
+  GitRef:
+    Type: String
+    Default: main
+    AllowedPattern: "^[A-Za-z0-9._/-]+$"
+  TlsContactEmail:
+    Type: String
+    AllowedPattern: "^[^@ ]+@[^@ ]+\\.[^@ ]+$"
+  UbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TokenGuard public HTTPS and restricted SSH
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+          Description: Restricted administrator SSH
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: ACME and HTTPS redirect
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTPS
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: tokenguard-free-tier
+        - Key: Project
+          Value: TokenGuardAI
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref UbuntuAmi
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 30
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: tokenguard-free-tier
+        - Key: Project
+          Value: TokenGuardAI
+      UserData:
+        Fn::Base64: !Sub |
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec > >(tee /var/log/tokenguard-bootstrap.log | logger -t tokenguard-bootstrap -s 2>/dev/console) 2>&1
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y ca-certificates curl docker.io docker-compose-v2 git openssl
+
+          # A 2 GiB host needs swap while building the Python/ML image and for
+          # occasional traffic spikes. Swap is a guardrail, not extra capacity.
+          if [ ! -f /swapfile ]; then
+            fallocate -l 4G /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+
+          systemctl enable --now docker
+          usermod -aG docker ubuntu
+          install -d -o ubuntu -g ubuntu /opt/tokenguard
+          git clone --branch '${GitRef}' --depth 1 '${RepositoryUrl}' /opt/tokenguard/app
+          cd /opt/tokenguard/app
+
+          TOKEN=$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' http://169.254.169.254/latest/api/token)
+          PUBLIC_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+          API_DOMAIN="api.$PUBLIC_IP.sslip.io"
+          DASHBOARD_DOMAIN="app.$PUBLIC_IP.sslip.io"
+          POSTGRES_PASSWORD=$(openssl rand -hex 32)
+          REDIS_PASSWORD=$(openssl rand -hex 32)
+          JWT_SECRET_KEY=$(openssl rand -base64 64 | tr -d '\n')
+          TOKEN_GUARD_MASTER_KEY=$(openssl rand 32 | base64 | tr '+/' '-_' | tr -d '\n')
+
+          umask 077
+          cat > .env.production <<ENV
+          APP_NAME=TokenGuard AI
+          APP_VERSION=1.5.0
+          ENVIRONMENT=production
+          DEBUG=false
+          LOG_LEVEL=INFO
+          LOG_FORMAT=json
+          ENABLE_DOCS=false
+          API_DOMAIN=$API_DOMAIN
+          DASHBOARD_DOMAIN=$DASHBOARD_DOMAIN
+          TLS_CONTACT_EMAIL=${TlsContactEmail}
+          ALLOWED_HOSTS=$API_DOMAIN,api,127.0.0.1
+          CORS_ALLOWED_ORIGINS=https://$DASHBOARD_DOMAIN
+          FORCE_HTTPS_REDIRECT=false
+          POSTGRES_DB=tokenguard
+          POSTGRES_USER=tokenguard
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+          REDIS_PASSWORD=$REDIS_PASSWORD
+          TOKEN_GUARD_MASTER_KEY=$TOKEN_GUARD_MASTER_KEY
+          JWT_SECRET_KEY=$JWT_SECRET_KEY
+          JWT_ALGORITHM=HS256
+          JWT_ISSUER=tokenguard
+          JWT_AUDIENCE=tokenguard-api
+          AUTHENTICATION_ENABLED=true
+          REQUIRE_PROJECT_AUTHENTICATION=true
+          REQUIRE_ADMIN_AUTHENTICATION=true
+          ALLOW_PUBLIC_REGISTRATION=false
+          REQUIRE_EMAIL_VERIFICATION=false
+          POLICY_ENFORCEMENT_ENABLED=true
+          BUDGET_ENFORCEMENT_ENABLED=true
+          RATE_LIMITING_ENABLED=true
+          PROMPT_INJECTION_DETECTION_ENABLED=true
+          PII_DETECTION_ENABLED=true
+          PII_DEFAULT_ACTION=redact
+          OUTPUT_SECRET_SCAN_ENABLED=true
+          STORE_RAW_SECURITY_CONTENT=false
+          ENABLE_PROMETHEUS_METRICS=true
+          ENABLE_OPENTELEMETRY=false
+          SEMANTIC_CACHE_ENABLED=false
+          OPENROUTER_API_KEY=
+          OPENAI_API_KEY=
+          ANTHROPIC_API_KEY=
+          GROQ_API_KEY=
+          ENV
+          chown ubuntu:ubuntu .env.production
+          chmod 600 .env.production
+
+          COMPOSE_BAKE=false docker compose -f docker-compose.aws.yml build
+          docker compose -f docker-compose.aws.yml up -d
+
+          cat > /usr/local/sbin/tokenguard-backup <<'BACKUP'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          cd /opt/tokenguard/app
+          install -d -m 700 /opt/tokenguard/backups
+          stamp=$(date -u +%Y%m%dT%H%M%SZ)
+          docker compose -f docker-compose.aws.yml exec -T postgres pg_dump \
+            -U tokenguard -d tokenguard -Fc > "/opt/tokenguard/backups/$stamp.dump"
+          find /opt/tokenguard/backups -type f -name '*.dump' -mtime +7 -delete
+          BACKUP
+          chmod 700 /usr/local/sbin/tokenguard-backup
+
+          cat > /etc/systemd/system/tokenguard-backup.service <<'UNIT'
+          [Unit]
+          Description=TokenGuard PostgreSQL backup
+          After=docker.service
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/tokenguard-backup
+          UNIT
+          cat > /etc/systemd/system/tokenguard-backup.timer <<'TIMER'
+          [Unit]
+          Description=Daily TokenGuard PostgreSQL backup
+          [Timer]
+          OnCalendar=*-*-* 03:15:00 UTC
+          Persistent=true
+          RandomizedDelaySec=900
+          [Install]
+          WantedBy=timers.target
+          TIMER
+          systemctl daemon-reload
+          systemctl enable --now tokenguard-backup.timer
+
+          docker compose -f docker-compose.aws.yml ps
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  PublicIp:
+    Value: !GetAtt Instance.PublicIp
+  ApiUrl:
+    Value: !Sub "https://api.${Instance.PublicIp}.sslip.io"
+  DashboardUrl:
+    Value: !Sub "https://app.${Instance.PublicIp}.sslip.io"
+  SshCommand:
+    Value: !Sub "ssh -i <private-key.pem> ubuntu@${Instance.PublicIp}"

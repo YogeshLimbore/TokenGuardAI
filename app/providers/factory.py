@@ -1,9 +1,11 @@
 from app.providers.anthropic import AnthropicProvider
 from app.providers.base import BaseLLMProvider
+from app.providers.compatible import CompatibleProvider
 from app.providers.groq import GroqProvider
 from app.providers.ollama import OllamaProvider
 from app.providers.openai import OpenAIProvider
 from app.providers.openrouter import OpenRouterProvider
+from app.providers.registry import get_provider
 
 
 class UnsupportedProviderError(ValueError):
@@ -33,4 +35,8 @@ class ProviderFactory:
         if normalized_name == "groq":
             return GroqProvider(api_key=api_key)
 
-        raise UnsupportedProviderError(f"Unsupported provider: {provider_name}")
+        try:
+            get_provider(normalized_name)
+        except ValueError as error:
+            raise UnsupportedProviderError(str(error)) from error
+        return CompatibleProvider(api_key=api_key, provider_name=normalized_name)

@@ -16,6 +16,7 @@ from fastapi import (
     Request,
     status,
 )
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.cache.redis_client import get_redis_client
@@ -26,9 +27,12 @@ from app.dependencies.user_authentication import get_current_user
 from app.schemas.identity import (
     LoginRequest,
     LogoutRequest,
+    PasswordChangeRequest,
     RefreshTokenRequest,
+    SessionResponse,
     TokenResponse,
     UserCreateRequest,
+    UserProvisionRequest,
     UserResponse,
 )
 from app.services.auth_rate_limit_service import (
@@ -44,11 +48,7 @@ from app.services.identity_service import (
 
 
 def _client_ip(http_request: Request) -> str:
-    forwarded_for = http_request.headers.get("X-Forwarded-For")
-
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-
+    # Uvicorn applies forwarded headers only from configured trusted proxies.
     return http_request.client.host if http_request.client else "unknown"
 
 
@@ -91,6 +91,46 @@ def user_to_response(user: User) -> UserResponse:
         last_login_at=user.last_login_at,
         created_at=user.created_at,
     )
+
+
+def _require_platform_admin(user: User) -> None:
+    if not user.is_platform_admin:
+        raise HTTPException(status_code=403, detail="Platform administrator required.")
+
+
+@router.get("/users", response_model=list[UserResponse])
+async def list_users(
+    user: User = Depends(get_current_user),
+    database: Session = Depends(get_database_session),
+) -> list[UserResponse]:
+    _require_platform_admin(user)
+    users = database.scalars(select(User).order_by(User.email)).all()
+    return [user_to_response(record) for record in users]
+
+
+@router.post(
+    "/users",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def provision_user(
+    request: UserProvisionRequest,
+    user: User = Depends(get_current_user),
+    database: Session = Depends(get_database_session),
+) -> UserResponse:
+    _require_platform_admin(user)
+    try:
+        created = IdentityService().create_user(
+            database,
+            email=request.email,
+            display_name=request.display_name,
+            password=request.password,
+            is_platform_admin=request.is_platform_admin,
+            is_email_verified=request.is_email_verified,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return user_to_response(created)
 
 
 @router.post(
@@ -258,3 +298,56 @@ async def get_me(
     user: User = Depends(get_current_user),
 ) -> UserResponse:
     return user_to_response(user)
+
+
+@router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    request: PasswordChangeRequest,
+    user: User = Depends(get_current_user),
+    database: Session = Depends(get_database_session),
+) -> None:
+    try:
+        IdentityService().change_password(
+            database,
+            user_id=user.id,
+            current_password=request.current_password,
+            new_password=request.new_password,
+        )
+    except InvalidCredentialsError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/sessions", response_model=list[SessionResponse])
+async def list_sessions(
+    user: User = Depends(get_current_user),
+    database: Session = Depends(get_database_session),
+) -> list[SessionResponse]:
+    return [
+        SessionResponse(
+            token_id=record.token_id,
+            expires_at=record.expires_at,
+            revoked_at=record.revoked_at,
+            created_at=record.created_at,
+        )
+        for record in IdentityService.list_sessions(database, user_id=user.id)
+    ]
+
+
+@router.delete("/sessions", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_all_sessions(
+    user: User = Depends(get_current_user),
+    database: Session = Depends(get_database_session),
+) -> None:
+    IdentityService().revoke_sessions(database, user_id=user.id)
+
+
+@router.delete("/sessions/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_session(
+    token_id: str,
+    user: User = Depends(get_current_user),
+    database: Session = Depends(get_database_session),
+) -> None:
+    if not IdentityService().revoke_sessions(
+        database, user_id=user.id, token_id=token_id
+    ):
+        raise HTTPException(status_code=404, detail="Session was not found.")

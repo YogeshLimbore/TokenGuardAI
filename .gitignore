@@ -57,6 +57,7 @@ certs/
 *.pem
 *.key
 *.crt
+.aws-deploy/
 
 # IDE files
 .vscode/

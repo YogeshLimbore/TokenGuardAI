@@ -1,3 +1,5 @@
+import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -156,6 +158,7 @@ class ProjectService:
         project_id: int,
         name: str,
         expires_at: datetime | None,
+        scopes: Sequence[str] | None = None,
     ) -> tuple[ProjectAPIKey, str]:
         project = self.get_by_id(
             database,
@@ -165,9 +168,14 @@ class ProjectService:
         if not project.is_active:
             raise ValueError("Cannot create a key for an inactive project.")
 
+        if expires_at is not None and expires_at.replace(tzinfo=UTC) <= datetime.now(
+            UTC
+        ):
+            raise ValueError("Key expiry must be in the future.")
         plaintext_key = self.key_service.generate_key()
 
         key_record = ProjectAPIKey(
+            scopes_json=json.dumps(scopes or ["chat"]),
             project_id=project.id,
             name=name.strip(),
             key_prefix=(self.key_service.extract_prefix(plaintext_key)),

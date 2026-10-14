@@ -1,3 +1,5 @@
+import json
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -63,6 +65,7 @@ def api_key_to_response(
     key_record: ProjectAPIKey,
 ) -> ProjectAPIKeyResponse:
     return ProjectAPIKeyResponse(
+        scopes=json.loads(key_record.scopes_json),
         id=key_record.id,
         project_id=key_record.project_id,
         name=key_record.name,
@@ -188,6 +191,7 @@ async def create_project_api_key(
             project_id=project_id,
             name=request.name,
             expires_at=request.expires_at,
+            scopes=request.scopes,
         )
 
         return ProjectAPIKeyCreateResponse(

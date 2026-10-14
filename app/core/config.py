@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -84,6 +85,15 @@ class Settings(BaseSettings):
     semantic_cache_max_candidates: int = 500
 
     request_timeout_seconds: float = 120.0
+    provider_total_timeout_seconds: float = 180.0
+    default_output_tokens: int = 500
+    maximum_request_bytes: int = 1_048_576
+    maximum_provider_response_bytes: int = 4_194_304
+    provider_configs: dict[str, dict[str, str]] = {}
+    provider_pricing: dict[str, dict[str, dict[str, float]]] = {}
+    allow_local_fallback: bool = False
+    moderation_fail_closed: bool = True
+    store_request_content: bool = False
 
     routing_policy_file: str = "config/routing_policy.json"
     auto_routing_enabled: bool = True
@@ -113,6 +123,9 @@ class Settings(BaseSettings):
     stream_heartbeat_seconds: int = 15
 
     job_result_retention_days: int = 7
+    maximum_active_jobs_per_project: int = 3
+    maximum_evaluation_dataset_bytes: int = 5_000_000
+    maximum_evaluation_examples: int = 10_000
     request_log_retention_days: int = 90
     cache_cleanup_interval_hours: int = 6
     usage_aggregation_interval_minutes: int = 15
@@ -147,9 +160,6 @@ class Settings(BaseSettings):
     allow_public_registration: bool = False
     require_email_verification: bool = False
 
-    bootstrap_admin_email: str | None = None
-    bootstrap_admin_password: str | None = None
-
     auth_login_rate_limit_per_minute: int = 10
     auth_refresh_rate_limit_per_minute: int = 20
 
@@ -169,6 +179,77 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET_KEY must contain at least 48 characters.")
         return value
 
+    @field_validator("provider_pricing")
+    @classmethod
+    def validate_provider_pricing(
+        cls, value: dict[str, dict[str, dict[str, float]]]
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        for provider, models in value.items():
+            if not provider.strip() or provider != provider.strip().lower():
+                raise ValueError("Provider pricing names must be lowercase.")
+            for model, prices in models.items():
+                if not model.strip():
+                    raise ValueError("Provider pricing model names cannot be empty.")
+                required = {
+                    "input_usd_per_1m_tokens",
+                    "output_usd_per_1m_tokens",
+                }
+                if set(prices) != required or any(
+                    price < 0 for price in prices.values()
+                ):
+                    raise ValueError(
+                        "Provider pricing requires non-negative input and output prices."
+                    )
+        return value
+
+    @field_validator("provider_configs")
+    @classmethod
+    def validate_provider_configs(
+        cls, value: dict[str, dict[str, str]]
+    ) -> dict[str, dict[str, str]]:
+        built_in = {
+            "ollama",
+            "openai",
+            "anthropic",
+            "openrouter",
+            "groq",
+            "gemini",
+            "deepseek",
+            "mistral",
+            "together",
+            "fireworks",
+            "xai",
+            "perplexity",
+        }
+        for name, config in value.items():
+            if (
+                not name.replace("_", "").replace("-", "").isalnum()
+                or name != name.lower()
+                or name in built_in
+            ):
+                raise ValueError(
+                    "Custom provider names must be unique lowercase identifiers."
+                )
+            url = str(config.get("base_url", "")).rstrip("/")
+            parsed = urlsplit(url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "Custom provider endpoints must be HTTPS URLs without credentials, query or fragment."
+                )
+            if config.get("token_parameter", "max_tokens") not in {
+                "max_tokens",
+                "max_completion_tokens",
+            }:
+                raise ValueError("Unsupported output-token parameter.")
+        return value
+
     @model_validator(mode="after")
     def enforce_production_guards(self) -> "Settings":
         """
@@ -178,6 +259,24 @@ class Settings(BaseSettings):
             return self
 
         problems: list[str] = []
+
+        if (
+            not self.require_admin_authentication
+            or not self.require_project_authentication
+            or not self.authentication_enabled
+        ):
+            problems.append("Authentication cannot be disabled in production.")
+
+        if not self.budget_enforcement_enabled or not self.policy_enforcement_enabled:
+            problems.append("Budget and policy enforcement are required in production.")
+
+        if not self.rate_limiting_enabled:
+            problems.append("Rate limiting is required in production.")
+
+        if (
+            self.input_moderation_enabled or self.output_moderation_enabled
+        ) and not self.openai_api_key:
+            problems.append("OPENAI_API_KEY is required when moderation is enabled.")
 
         if self.debug:
             problems.append("DEBUG must be false in production.")
@@ -189,11 +288,6 @@ class Settings(BaseSettings):
 
         if not self.token_guard_master_key:
             problems.append("TOKEN_GUARD_MASTER_KEY is required in production.")
-
-        if self.bootstrap_admin_password:
-            problems.append(
-                "BOOTSTRAP_ADMIN_PASSWORD must not remain set in production."
-            )
 
         if self.allow_public_registration:
             problems.append("ALLOW_PUBLIC_REGISTRATION must be false in production.")

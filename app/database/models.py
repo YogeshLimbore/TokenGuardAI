@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,6 +20,25 @@ from app.database.connection import Base
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+class UsageReservation(Base):
+    """Durable per-attempt admission; uncertain calls retain their reservation."""
+
+    __tablename__ = "usage_reservations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(100), index=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(50))
+    model: Mapped[str] = mapped_column(String(200))
+    total_tokens: Mapped[int] = mapped_column(Integer)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(20), default="reserved")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, index=True
+    )
 
 
 class User(Base):
@@ -91,6 +111,12 @@ class User(Base):
     password_changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
+        nullable=False,
+    )
+
+    session_version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
         nullable=False,
     )
 
@@ -371,6 +397,8 @@ class LLMRequestLog(Base):
     """
 
     __tablename__ = "llm_request_logs"
+    tokens_avoided: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cost_avoided_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -552,6 +580,34 @@ class ExactResponseCache(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
+    )
+
+
+class ProjectModelPrice(Base):
+    """Project-controlled price snapshot used for budget admission."""
+
+    __tablename__ = "project_model_prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    input_usd_per_1m_tokens: Mapped[float] = mapped_column(Float, nullable=False)
+    output_usd_per_1m_tokens: Mapped[float] = mapped_column(Float, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "provider", "model", name="uq_project_provider_model_price"
+        ),
     )
 
 
@@ -1216,6 +1272,17 @@ class Project(Base):
 
     __tablename__ = "projects"
 
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_project_org_name"),
+        Index(
+            "uq_project_legacy_name",
+            "name",
+            unique=True,
+            postgresql_where=text("organization_id IS NULL"),
+            sqlite_where=text("organization_id IS NULL"),
+        ),
+    )
+
     id: Mapped[int] = mapped_column(
         Integer,
         primary_key=True,
@@ -1224,7 +1291,6 @@ class Project(Base):
 
     name: Mapped[str] = mapped_column(
         String(120),
-        unique=True,
         index=True,
         nullable=False,
     )
@@ -1473,6 +1539,7 @@ class ProjectAPIKey(Base):
     """
 
     __tablename__ = "project_api_keys"
+    scopes_json: Mapped[str] = mapped_column(Text, default='["chat"]', nullable=False)
 
     id: Mapped[int] = mapped_column(
         Integer,

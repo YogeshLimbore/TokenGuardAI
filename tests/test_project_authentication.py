@@ -63,7 +63,7 @@ def _create_project_and_key(client: TestClient) -> str:
 
     key_response = client.post(
         f"/v1/projects/{project_id}/api-keys",
-        json={"name": "Test Key"},
+        json={"name": "Test Key", "scopes": ["credentials:read"]},
     )
 
     assert key_response.status_code == 201
@@ -142,7 +142,7 @@ def test_two_projects_have_independent_keys(
 
     second_key_response = client.post(
         f"/v1/projects/{second_project_id}/api-keys",
-        json={"name": "Second Key"},
+        json={"name": "Second Key", "scopes": ["credentials:read"]},
     )
     second_key = second_key_response.json()["api_key"]
 

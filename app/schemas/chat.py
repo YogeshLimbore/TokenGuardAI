@@ -1,7 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
+from app.providers.registry import validate_provider
 from app.schemas.budget import BudgetDecision
 from app.schemas.governance import GovernanceDecision
 from app.schemas.reliability import (
@@ -12,7 +13,7 @@ from app.schemas.routing import RoutingDecision
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=100_000)
 
     @field_validator("content")
     @classmethod
@@ -22,19 +23,22 @@ class ChatMessage(BaseModel):
         if not cleaned_value:
             raise ValueError("Message content cannot be empty.")
 
-        return cleaned_value
+        return value
 
 
 class ChatCompletionRequest(BaseModel):
-    provider: Literal["ollama", "openai", "anthropic", "openrouter", "groq"] = "ollama"
+    _stream_upstream: bool = PrivateAttr(default=False)
+    provider: str = "ollama"
+
+    _provider_validator = field_validator("provider")(validate_provider)
 
     credential_id: int | None = Field(
         default=None,
         ge=1,
     )
 
-    model: str | None = None
-    messages: list[ChatMessage] = Field(min_length=1)
+    model: str | None = Field(default=None, max_length=200)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=100)
 
     temperature: float = Field(
         default=0.7,

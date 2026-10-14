@@ -13,6 +13,10 @@ class RoutingConfigurationError(RuntimeError):
     pass
 
 
+class RoutingRequestError(ValueError):
+    """The caller omitted or supplied an invalid manual routing value."""
+
+
 @dataclass(frozen=True)
 class RouteTarget:
     tier: str
@@ -297,16 +301,13 @@ class RoutingService:
             selected_model = request.model
 
             if selected_model is None:
-                if request.provider == "ollama":
-                    selected_model = self.settings.ollama_default_model
-                elif request.provider == "openai":
-                    selected_model = self.settings.openai_default_model
-                elif request.provider == "anthropic":
-                    selected_model = self.settings.anthropic_default_model
-                elif request.provider == "groq":
-                    selected_model = self.settings.groq_default_model
-                else:
-                    selected_model = self.settings.openrouter_default_model
+                from app.providers.registry import get_provider
+
+                selected_model = get_provider(request.provider).default_model
+                if not selected_model:
+                    raise RoutingRequestError(
+                        "Specify a model for the selected provider."
+                    )
 
             return InternalRoutingDecision(
                 automatic_routing_used=False,

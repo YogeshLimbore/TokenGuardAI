@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.dependencies.admin_authentication import require_admin
 from app.schemas.evaluation import (
     SemanticEvaluationResponse,
 )
@@ -11,6 +12,7 @@ from app.services.semantic_evaluation_service import (
 router = APIRouter(
     prefix="/v1/evaluation",
     tags=["Evaluation"],
+    dependencies=[Depends(require_admin)],
 )
 
 
@@ -18,7 +20,7 @@ router = APIRouter(
     "/semantic-cache",
     response_model=SemanticEvaluationResponse,
 )
-async def evaluate_semantic_cache(
+def evaluate_semantic_cache(
     minimum_threshold: float = Query(
         default=0.80,
         ge=0.0,
@@ -31,7 +33,7 @@ async def evaluate_semantic_cache(
     ),
     step: float = Query(
         default=0.01,
-        gt=0.0,
+        ge=0.001,
         le=0.25,
     ),
     include_pair_results: bool = Query(default=True),
@@ -42,12 +44,12 @@ async def evaluate_semantic_cache(
             detail=("minimum_threshold cannot be greater than maximum_threshold."),
         )
 
-    thresholds: list[float] = []
-    current_threshold = minimum_threshold
-
-    while current_threshold <= maximum_threshold + 1e-9:
-        thresholds.append(round(current_threshold, 4))
-        current_threshold += step
+    count = int((maximum_threshold - minimum_threshold) / step + 1e-9) + 1
+    if count > 201:
+        raise HTTPException(
+            status_code=400, detail="At most 201 thresholds are allowed."
+        )
+    thresholds = [round(minimum_threshold + index * step, 4) for index in range(count)]
 
     try:
         service = SemanticEvaluationService()

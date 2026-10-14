@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from celery import states
 from celery.exceptions import Ignore
+from sqlalchemy import select
 
 from app.database.connection import SessionLocal
 from app.database.models import BackgroundJob
@@ -11,6 +12,10 @@ from app.services.semantic_evaluation_service import (
     SemanticEvaluationService,
 )
 from app.workers.celery_app import celery_app
+
+
+class JobCancelledError(RuntimeError):
+    """Raised when a worker observes a cooperative cancellation request."""
 
 
 @celery_app.task(
@@ -27,9 +32,10 @@ def run_semantic_evaluation(
     database = SessionLocal()
 
     try:
-        job = database.get(
-            BackgroundJob,
-            database_job_id,
+        job = database.scalar(
+            select(BackgroundJob)
+            .where(BackgroundJob.id == database_job_id)
+            .with_for_update()
         )
 
         if job is None:
@@ -39,6 +45,8 @@ def run_semantic_evaluation(
             # The caller cancelled the job before a worker
             # picked it up. Do not overwrite that decision.
             return {"status": "cancelled"}
+        if job.status != "queued":
+            return {"status": job.status}
 
         job.status = "running"
         job.started_at = datetime.now(UTC)
@@ -58,6 +66,9 @@ def run_semantic_evaluation(
         job_record = job
 
         def progress_callback(value: float) -> None:
+            database.refresh(job_record)
+            if job_record.status == "cancelled":
+                raise JobCancelledError("The job was cancelled.")
             self.update_state(
                 state="PROGRESS",
                 meta={"progress_percent": value},
@@ -74,6 +85,9 @@ def run_semantic_evaluation(
 
         result_payload = result.model_dump()
 
+        database.refresh(job)
+        if job.status == "cancelled":
+            raise JobCancelledError("The job was cancelled.")
         job.status = "completed"
         job.progress_percent = 100.0
         job.result_json = json.dumps(
@@ -84,6 +98,15 @@ def run_semantic_evaluation(
         database.commit()
 
         return result_payload
+
+    except JobCancelledError:
+        database.rollback()
+        job = database.get(BackgroundJob, database_job_id)
+        if job is not None:
+            job.status = "cancelled"
+            job.completed_at = datetime.now(UTC)
+            database.commit()
+        return {"status": "cancelled"}
 
     except EvaluationDatasetError as error:
         database.rollback()

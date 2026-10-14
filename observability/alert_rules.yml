@@ -136,15 +136,15 @@ groups:
 
       - alert: TokenGuardOutputSecretsDetected
         expr: >-
-          sum(increase(tokenguard_pii_findings_total{action="block"}[15m])) > 0
+          sum(increase(tokenguard_governance_decisions_total{action="block",event_type="output"}[15m])) > 0
         labels:
           severity: critical
         annotations:
           summary: Output was blocked for containing sensitive data
           description: >-
-            A model response contained credential- or PII-shaped content and
-            was withheld. Investigate promptly: a leaking system prompt or a
-            poisoned context can produce this.
+            A model response failed output security and was withheld.
+            Review the project security events without copying blocked content
+            into tickets or chat systems.
 
       - alert: TokenGuardRateLimitSpike
         expr: >-

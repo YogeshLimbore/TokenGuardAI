@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from functools import lru_cache
+from datetime import UTC, datetime, timedelta
+from functools import cached_property, lru_cache
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -32,7 +32,10 @@ def get_embedding_model() -> SentenceTransformer:
 class SemanticCacheService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.model = get_embedding_model()
+
+    @cached_property
+    def model(self) -> SentenceTransformer:
+        return get_embedding_model()
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -62,11 +65,14 @@ class SemanticCacheService:
         self,
         request: ChatCompletionRequest,
     ) -> str:
-        system_text = self._extract_system_text(request)
+        from app.services.cache_policy import policy_fingerprint
 
-        normalized_system_text = self._normalize_text(system_text)
-
-        return hashlib.sha256(normalized_system_text.encode("utf-8")).hexdigest()
+        # Preserve exact prior conversation and partition embedding/policy versions.
+        context = [m.model_dump() for m in request.messages[:-1]]
+        payload = [context, self.settings.semantic_cache_model, policy_fingerprint()]
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
     def encode_text(self, text: str) -> np.ndarray:
         embedding = self.model.encode(
@@ -103,6 +109,8 @@ class SemanticCacheService:
         left: np.ndarray,
         right: np.ndarray,
     ) -> float:
+        if left.shape != right.shape:
+            return 0.0
         denominator = np.linalg.norm(left) * np.linalg.norm(right)
 
         if denominator == 0:
@@ -120,7 +128,11 @@ class SemanticCacheService:
         request: ChatCompletionRequest,
         selected_model: str,
     ) -> SemanticCacheMatch | None:
-        if not self.settings.semantic_cache_enabled:
+        if (
+            not self.settings.semantic_cache_enabled
+            or not request.messages
+            or request.messages[-1].role != "user"
+        ):
             return None
 
         user_prompt = self._extract_latest_user_prompt(request)
@@ -132,6 +144,9 @@ class SemanticCacheService:
         statement = (
             select(SemanticResponseCache)
             .where(
+                SemanticResponseCache.created_at
+                >= datetime.now(UTC)
+                - timedelta(seconds=self.settings.redis_cache_ttl_seconds),
                 SemanticResponseCache.project_id == project_id,
                 SemanticResponseCache.provider == request.provider,
                 SemanticResponseCache.model == selected_model,
@@ -216,9 +231,14 @@ class SemanticCacheService:
         database: Session,
         entry: SemanticResponseCache,
     ) -> None:
-        entry.hit_count += 1
-        entry.last_hit_at = datetime.now(UTC)
-
+        database.execute(
+            update(SemanticResponseCache)
+            .where(SemanticResponseCache.id == entry.id)
+            .values(
+                hit_count=SemanticResponseCache.hit_count + 1,
+                last_hit_at=datetime.now(UTC),
+            )
+        )
         database.commit()
 
     def response_already_stored(
@@ -232,6 +252,9 @@ class SemanticCacheService:
         user_prompt = self._extract_latest_user_prompt(request)
 
         statement = select(SemanticResponseCache.id).where(
+            SemanticResponseCache.created_at
+            >= datetime.now(UTC)
+            - timedelta(seconds=self.settings.redis_cache_ttl_seconds),
             SemanticResponseCache.project_id == project_id,
             SemanticResponseCache.provider == request.provider,
             SemanticResponseCache.credential_id == request.credential_id,

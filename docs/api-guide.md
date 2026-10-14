@@ -50,8 +50,15 @@ $refreshed = Invoke-RestMethod `
 ```
 
 Refresh tokens rotate on every use. Presenting a refresh token twice revokes
-the whole chain, on the assumption that the token was stolen, so store only
-the newest one.
+all refresh sessions for that user, on the assumption that the token was
+stolen, so store only the newest one.
+
+Users can change their password with `POST /v1/auth/password`, inspect sessions
+with `GET /v1/auth/sessions`, revoke one with
+`DELETE /v1/auth/sessions/{token_id}`, or revoke all with
+`DELETE /v1/auth/sessions`. A password change revokes both existing access
+tokens and refresh sessions. Platform administrators can provision verified
+users through `POST /v1/auth/users` while public registration remains disabled.
 
 ### Creating a project key
 
@@ -101,7 +108,7 @@ $response = Invoke-RestMethod `
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `provider` | `ollama`, `openai`, `anthropic`, `openrouter`, `groq` | `ollama` | Ignored when `auto_route` is true and routing picks another provider |
+| `provider` | registered provider name | `ollama` | Built-ins include Ollama, OpenAI, Anthropic, OpenRouter, Groq, Gemini, DeepSeek, Mistral, Together, Fireworks, xAI, and Perplexity; ignored when automatic routing picks another provider |
 | `credential_id` | int | null | Use a specific stored credential. Defaults to the project's default credential for that provider |
 | `model` | string | null | Falls back to the provider's configured default model |
 | `messages` | array | required | At least one message; `role` is `system`, `user`, or `assistant` |
@@ -296,6 +303,35 @@ Invoke-RestMethod `
 
 `POST /v1/credentials/{id}/rotate` replaces the secret while keeping the same
 credential ID, so nothing referencing that ID needs updating.
+
+### Model discovery and pricing
+
+`GET /v1/providers` lists the operator-approved provider catalog.
+`GET /v1/providers/{provider}/models` discovers up to 1,000 models with the
+project's chosen credential. Discovery does not automatically trust or price a
+model.
+
+Paid requests fail closed until an exact or wildcard price is known. Project
+administrators can manage prices in the dashboard or with:
+
+```powershell
+# USD per one million tokens; use model="*" for a provider fallback
+Invoke-RestMethod `
+    -Uri "$baseUrl/v1/providers/pricing/openai" `
+    -Method Put `
+    -Headers $projectHeaders `
+    -ContentType "application/json" `
+    -Body (@{
+        model = "gpt-4.1-mini"
+        input_usd_per_1m_tokens = 0.4
+        output_usd_per_1m_tokens = 1.6
+    } | ConvertTo-Json)
+
+Invoke-RestMethod -Uri "$baseUrl/v1/providers/pricing" -Headers $projectHeaders
+```
+
+Project keys need `credentials:read` for provider/model discovery and
+`governance:read` or `governance:manage` for pricing reads or mutations.
 
 ## Background jobs
 

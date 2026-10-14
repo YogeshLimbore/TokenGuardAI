@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -64,6 +65,7 @@ from app.services.project_service import ProjectService
 from app.services.token_service_jwt import JWTService
 
 TEST_DATABASE_URL = os.environ["DATABASE_URL"]
+TEST_REDIS_URL = os.environ["REDIS_URL"]
 TEST_PASSWORD = "Secure-Test-Password-123!"
 
 test_engine = create_engine(
@@ -84,11 +86,35 @@ TestingSessionLocal = sessionmaker(
 
 @pytest.fixture(scope="session", autouse=True)
 def verify_test_database() -> None:
-    """Refuse to run the suite against a non-test database."""
-    if "tokenguard_test" not in TEST_DATABASE_URL:
+    """Require explicit permission and local, dedicated destructive targets."""
+    from sqlalchemy.engine import make_url
+
+    if os.environ.get("ALLOW_TEST_DATA_RESET", "").lower() != "true":
         raise RuntimeError(
-            f"Tests must run against tokenguard_test, got: {TEST_DATABASE_URL}"
+            "Set ALLOW_TEST_DATA_RESET=true only after selecting disposable "
+            "PostgreSQL and Redis test targets."
         )
+
+    database_url = make_url(TEST_DATABASE_URL)
+    if (
+        database_url.host not in {"localhost", "127.0.0.1", "::1"}
+        or not database_url.database
+        or not database_url.database.endswith("_test")
+    ):
+        raise RuntimeError(
+            "Tests require a local PostgreSQL database whose name ends in '_test'."
+        )
+
+    redis_url = urlsplit(TEST_REDIS_URL)
+    try:
+        redis_database = int(redis_url.path.lstrip("/") or "0")
+    except ValueError as error:
+        raise RuntimeError("TEST_REDIS_URL must select a numeric database.") from error
+    if (
+        redis_url.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or redis_database <= 0
+    ):
+        raise RuntimeError("Tests require a local, non-zero Redis database.")
 
 
 @pytest.fixture(autouse=True)
@@ -239,6 +265,18 @@ def create_project_with_key(
         project_id=project.id,
         name="Test Key",
         expires_at=None,
+        scopes=[
+            "chat",
+            "analytics:read",
+            "credentials:read",
+            "credentials:manage",
+            "jobs:read",
+            "jobs:create",
+            "jobs:cancel",
+            "security_events:read",
+            "governance:read",
+            "governance:manage",
+        ],
     )
 
     return project, plaintext_key

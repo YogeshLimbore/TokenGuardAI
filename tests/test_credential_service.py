@@ -1141,7 +1141,7 @@ async def test_groq_credential_test_handles_transport_failures(
     assert message == expected_message
 
 
-async def test_credential_test_is_unimplemented_for_other_providers(
+async def test_credential_test_probes_other_providers(
     database: Session,
     service: CredentialService,
     project_id: int,
@@ -1161,7 +1161,7 @@ async def test_credential_test_is_unimplemented_for_other_providers(
     )
 
     assert valid is False
-    assert "not implemented" in message
+    assert "HTTP 404" in message
 
 
 async def test_credential_test_works_on_an_inactive_credential(

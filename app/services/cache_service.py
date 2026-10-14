@@ -1,11 +1,15 @@
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.database.models import ExactResponseCache
 from app.schemas.chat import ChatCompletionRequest
+from app.services.cache_policy import policy_fingerprint
 
 
 class CacheService:
@@ -23,6 +27,7 @@ class CacheService:
         project_id: int,
     ) -> str:
         normalized_request = {
+            "policy_version": policy_fingerprint(),
             "project_id": project_id,
             "provider": request.provider.lower(),
             "credential_id": request.credential_id,
@@ -55,6 +60,9 @@ class CacheService:
         project_id: int,
     ) -> ExactResponseCache | None:
         statement = select(ExactResponseCache).where(
+            ExactResponseCache.created_at
+            >= datetime.now(UTC)
+            - timedelta(seconds=get_settings().redis_cache_ttl_seconds),
             ExactResponseCache.cache_key == cache_key,
             ExactResponseCache.project_id == project_id,
         )
@@ -88,7 +96,28 @@ class CacheService:
             original_latency_ms=latency_ms,
         )
 
-        database.add(cache_entry)
+        try:
+            with database.begin_nested():
+                database.add(cache_entry)
+                database.flush()
+        except IntegrityError:
+            existing = database.scalar(
+                select(ExactResponseCache).where(
+                    ExactResponseCache.cache_key == cache_key
+                )
+            )
+            if existing is None:
+                raise
+            existing.provider = provider
+            existing.model = model
+            existing.prompt = prompt
+            existing.response = response
+            existing.input_tokens = input_tokens
+            existing.output_tokens = output_tokens
+            existing.total_tokens = input_tokens + output_tokens
+            existing.original_latency_ms = latency_ms
+            existing.created_at = datetime.now(UTC)
+            cache_entry = existing
         database.commit()
         database.refresh(cache_entry)
 
@@ -99,5 +128,9 @@ class CacheService:
         database: Session,
         cache_entry: ExactResponseCache,
     ) -> None:
-        cache_entry.hit_count += 1
+        database.execute(
+            update(ExactResponseCache)
+            .where(ExactResponseCache.id == cache_entry.id)
+            .values(hit_count=ExactResponseCache.hit_count + 1)
+        )
         database.commit()

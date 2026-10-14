@@ -42,6 +42,11 @@ class UserCreateRequest(BaseModel):
     )
 
 
+class UserProvisionRequest(UserCreateRequest):
+    is_platform_admin: bool = False
+    is_email_verified: bool = True
+
+
 class UserResponse(BaseModel):
     id: int
     email: EmailStr
@@ -60,23 +65,35 @@ class UserResponse(BaseModel):
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=256)
 
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
+    refresh_token: str = Field(min_length=1, max_length=512)
     token_type: Literal["bearer"] = "bearer"
     access_token_expires_at: datetime
     refresh_token_expires_at: datetime
 
 
 class RefreshTokenRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(min_length=1, max_length=512)
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(min_length=1, max_length=512)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class SessionResponse(BaseModel):
+    token_id: str
+    expires_at: datetime
+    revoked_at: datetime | None
+    created_at: datetime
 
 
 # ---------------------------------------------------------------------------

@@ -443,9 +443,31 @@ class CredentialService:
         elif credential.provider == "groq":
             valid, message = await self._test_groq(api_key)
         else:
-            message = (
-                f"Credential testing for {credential.provider} is not implemented yet."
-            )
+            from app.providers.registry import get_provider
+
+            spec = get_provider(credential.provider)
+            headers = {"Authorization": f"Bearer {api_key}"}
+            endpoint = spec.base_url.rstrip("/") + "/models"
+            if credential.provider == "anthropic":
+                endpoint = spec.base_url.rstrip("/") + "/v1/models"
+                headers = {
+                    "x-api-key": api_key,
+                    "anthropic-version": self.settings.anthropic_version,
+                }
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.settings.credential_test_timeout_seconds,
+                    follow_redirects=False,
+                ) as client:
+                    response = await client.get(endpoint, headers=headers)
+                valid = response.status_code == 200
+                message = (
+                    "Provider accepted the credential."
+                    if valid
+                    else f"Provider credential probe returned HTTP {response.status_code}."
+                )
+            except httpx.RequestError:
+                message = "Provider credential probe is unavailable."
 
         tested_at = datetime.now(UTC)
 

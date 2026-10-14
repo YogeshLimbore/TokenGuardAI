@@ -1,3 +1,5 @@
+from datetime import UTC
+
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -6,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database.connection import get_database_session
 from app.main import app
 from app.services.identity_service import IdentityService
+from app.services.token_service_jwt import JWTService
 
 
 @pytest.fixture
@@ -71,3 +74,23 @@ def test_auth_login_and_me_flow(db_session: Session, client: TestClient):
     me_data = res_me.json()
     assert me_data["email"] == "testuser@example.com"
     assert me_data["id"] == user.id
+
+
+def test_token_issued_in_account_creation_second_is_valid(
+    db_session: Session, client: TestClient
+):
+    user = IdentityService().create_user(
+        db_session,
+        email="same-second@example.com",
+        display_name="Same Second",
+        password="ValidPassword123!",
+    )
+    token, _ = JWTService().create_access_token(user_id=user.id)
+    issued_at = JWTService().decode_access_token(token)["iat"]
+    assert int(issued_at) == int(
+        user.password_changed_at.replace(tzinfo=UTC).timestamp()
+    )
+
+    response = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == status.HTTP_200_OK

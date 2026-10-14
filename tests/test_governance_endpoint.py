@@ -325,9 +325,20 @@ def test_model_access_denied_returns_403(client):
         captured_calls,
     )
 
-    with patch(
-        "app.services.fallback_service.ProviderFactory.create",
-        return_value=fake_provider,
+    restricted_policy = {
+        "allowed_providers": ["ollama"],
+        "allowed_models": {"ollama": ["llama3.2"]},
+        "blocked_models": [],
+    }
+    with (
+        patch(
+            "app.services.model_policy_service.ModelPolicyService._load_policy",
+            return_value=restricted_policy,
+        ),
+        patch(
+            "app.services.fallback_service.ProviderFactory.create",
+            return_value=fake_provider,
+        ),
     ):
         response = test_client.post(
             "/v1/chat/completions",
@@ -432,9 +443,21 @@ def test_project_policy_override_does_not_affect_other_projects(
         captured_calls,
     )
 
-    with patch(
-        "app.services.fallback_service.ProviderFactory.create",
-        return_value=fake_provider,
+    policy_with_project_override = {
+        "allowed_providers": ["ollama"],
+        "allowed_models": {"ollama": ["llama3.1", "llama3.2"]},
+        "blocked_models": [],
+        "projects": {"1": {"allowed_models": {"ollama": ["llama3.2"]}}},
+    }
+    with (
+        patch(
+            "app.services.model_policy_service.ModelPolicyService._load_policy",
+            return_value=policy_with_project_override,
+        ),
+        patch(
+            "app.services.fallback_service.ProviderFactory.create",
+            return_value=fake_provider,
+        ),
     ):
         denied_response = test_client.post(
             "/v1/chat/completions",

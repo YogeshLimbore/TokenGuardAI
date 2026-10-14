@@ -1,13 +1,21 @@
+import json
+from collections.abc import AsyncIterator
+
 import httpx
 
 from app.core.config import get_settings
-from app.providers.base import BaseLLMProvider, ProviderResponse
+from app.providers.base import (
+    BaseLLMProvider,
+    ProviderError,
+    ProviderResponse,
+    ProviderStreamEvent,
+)
 from app.schemas.chat import ChatMessage
 
 DEFAULT_MAX_TOKENS = 1024
 
 
-class AnthropicProviderError(Exception):
+class AnthropicProviderError(ProviderError):
     """Raised when Anthropic cannot successfully process a request."""
 
 
@@ -73,11 +81,33 @@ class AnthropicProvider(BaseLLMProvider):
             async with httpx.AsyncClient(
                 timeout=self.settings.request_timeout_seconds,
             ) as client:
-                response = await client.post(
-                    endpoint,
-                    headers=headers,
-                    json=payload,
-                )
+                async with client.stream(
+                    "POST", endpoint, headers=headers, json=payload
+                ) as response:
+                    if response.status_code >= 400:
+                        raise AnthropicProviderError(
+                            f"Anthropic returned HTTP {response.status_code}.",
+                            status_code=response.status_code,
+                        )
+                    content_length = response.headers.get("content-length")
+                    if (
+                        content_length is not None
+                        and content_length.isdigit()
+                        and int(content_length)
+                        > self.settings.maximum_provider_response_bytes
+                    ):
+                        raise AnthropicProviderError(
+                            "Anthropic response is too large.", status_code=502
+                        )
+                    chunks: list[bytes] = []
+                    received = 0
+                    async for chunk in response.aiter_bytes():
+                        received += len(chunk)
+                        if received > self.settings.maximum_provider_response_bytes:
+                            raise AnthropicProviderError(
+                                "Anthropic response is too large.", status_code=502
+                            )
+                        chunks.append(chunk)
 
         except httpx.ConnectError as error:
             raise AnthropicProviderError("Could not connect to Anthropic.") from error
@@ -87,27 +117,8 @@ class AnthropicProvider(BaseLLMProvider):
                 "Anthropic did not respond before the timeout."
             ) from error
 
-        if response.status_code == 401:
-            raise AnthropicProviderError("Anthropic rejected the API key.")
-
-        if response.status_code == 429:
-            raise AnthropicProviderError(
-                "Anthropic rate limit or API quota was exceeded."
-            )
-
-        if response.status_code >= 400:
-            try:
-                error_data = response.json()
-                error_message = error_data.get("error", {}).get("message")
-            except ValueError:
-                error_message = response.text
-
-            raise AnthropicProviderError(
-                error_message or (f"Anthropic returned HTTP {response.status_code}.")
-            )
-
         try:
-            data = response.json()
+            data = json.loads(b"".join(chunks))
             content = "".join(
                 block.get("text", "")
                 for block in data["content"]
@@ -130,3 +141,94 @@ class AnthropicProvider(BaseLLMProvider):
             output_tokens=usage.get("output_tokens"),
             cached_input_tokens=usage.get("cache_read_input_tokens"),
         )
+
+    async def stream(
+        self,
+        *,
+        messages: list[ChatMessage],
+        model: str | None,
+        temperature: float,
+        max_tokens: int | None,
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        if not self.api_key:
+            raise AnthropicProviderError(
+                "No Anthropic API key is available.", status_code=401
+            )
+        payload = {
+            "model": model or self.settings.anthropic_default_model,
+            "messages": [m.model_dump() for m in messages if m.role != "system"],
+            "system": "\n".join(m.content for m in messages if m.role == "system"),
+            "temperature": temperature,
+            "max_tokens": max_tokens or self.settings.default_output_tokens,
+            "stream": True,
+        }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": self.settings.anthropic_version,
+        }
+        completed = False
+        input_tokens = output_tokens = 0
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.settings.request_timeout_seconds, follow_redirects=False
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.settings.anthropic_base_url.rstrip('/')}/v1/messages",
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    if response.status_code >= 400:
+                        raise AnthropicProviderError(
+                            f"Anthropic returned HTTP {response.status_code}.",
+                            status_code=response.status_code,
+                        )
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = json.loads(line[5:])
+                        kind = data.get("type")
+                        if kind == "error":
+                            raise AnthropicProviderError(
+                                "Anthropic stream failed.", status_code=502
+                            )
+                        if kind == "message_start":
+                            input_tokens = (
+                                data.get("message", {})
+                                .get("usage", {})
+                                .get("input_tokens", 0)
+                            )
+                        elif (
+                            kind == "content_block_delta"
+                            and data.get("delta", {}).get("type") == "text_delta"
+                        ):
+                            yield ProviderStreamEvent(
+                                event_type="token", content=data["delta"]["text"]
+                            )
+                        elif kind == "message_delta":
+                            output_tokens = data.get("usage", {}).get(
+                                "output_tokens", output_tokens
+                            )
+                        elif kind == "message_stop":
+                            completed = True
+            if not completed:
+                raise AnthropicProviderError(
+                    "Anthropic stream ended without completion.", status_code=502
+                )
+            yield ProviderStreamEvent(
+                event_type="usage",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+            )
+            yield ProviderStreamEvent(
+                event_type="completed", model=str(payload["model"])
+            )
+        except httpx.RequestError as error:
+            raise AnthropicProviderError(
+                "Anthropic stream transport failed.", status_code=503
+            ) from error
+        except (ValueError, KeyError, TypeError) as error:
+            raise AnthropicProviderError(
+                "Invalid Anthropic stream.", status_code=502
+            ) from error

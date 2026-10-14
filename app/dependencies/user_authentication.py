@@ -1,20 +1,13 @@
-"""
-FastAPI dependency: resolves the authenticated user from the bearer token.
+"""Resolve an authenticated user from an HTTP bearer access token."""
 
-Used as a parameter dependency:
-
-    user: User = Depends(get_current_user)
-
-Swagger will expose the OAuth2 bearer flow through FastAPI's OpenAPI
-security integration when ``OAuth2PasswordBearer`` is declared here.
-"""
+from datetime import UTC
 
 from fastapi import (
     Depends,
     HTTPException,
     status,
 )
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_database_session
@@ -24,14 +17,11 @@ from app.services.token_service_jwt import (
     JWTService,
 )
 
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="/v1/auth/token",
-    auto_error=False,
-)
+oauth2_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    token: str | None = Depends(oauth2_scheme),
+    token: HTTPAuthorizationCredentials | str | None = Depends(oauth2_scheme),
     database: Session = Depends(get_database_session),
 ) -> User:
     """
@@ -43,6 +33,8 @@ async def get_current_user(
     - the subject is not a valid integer user ID
     - the user no longer exists or is inactive
     """
+    if isinstance(token, HTTPAuthorizationCredentials):
+        token = token.credentials
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -79,4 +71,28 @@ async def get_current_user(
             detail="User is inactive or missing.",
         )
 
+    token_version = payload.get("ver")
+    if (
+        isinstance(token_version, bool)
+        or not isinstance(token_version, int)
+        or token_version != user.session_version
+    ):
+        raise HTTPException(status_code=401, detail="Session has been revoked.")
+
+    from app.core.config import get_settings
+
+    issued_at = payload.get("iat")
+    if isinstance(issued_at, bool) or not isinstance(issued_at, int | float):
+        raise HTTPException(
+            status_code=401, detail="Access token issue time is invalid."
+        )
+    # JWT NumericDate values are encoded with whole-second precision. Compare
+    # at that same precision so a token issued immediately after account
+    # creation/password rotation is not treated as older by microseconds.
+    if user.password_changed_at and int(issued_at) < int(
+        user.password_changed_at.replace(tzinfo=UTC).timestamp()
+    ):
+        raise HTTPException(status_code=401, detail="Session has been revoked.")
+    if get_settings().require_email_verification and not user.is_email_verified:
+        raise HTTPException(status_code=403, detail="Email verification is required.")
     return user

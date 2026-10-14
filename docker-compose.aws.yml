@@ -1,0 +1,179 @@
+name: tokenguard
+
+# Lean single-host deployment for an AWS Free Tier staging environment.
+# This intentionally omits the observability stack and keeps Celery workers
+# behind a profile so the default stack can run on a 2 GiB t3.small.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tokenguard}
+      POSTGRES_USER: ${POSTGRES_USER:-tokenguard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tokenguard} -d ${POSTGRES_DB:-tokenguard}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+    mem_limit: 384m
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      - --maxmemory
+      - 96mb
+      - --maxmemory-policy
+      - allkeys-lru
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+    mem_limit: 128m
+    logging: *logging
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tokenguard-api:aws
+    restart: unless-stopped
+    env_file: [.env.production]
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      ENABLE_DOCS: "false"
+      FORCE_HTTPS_REDIRECT: "false"
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    networks: [backend, frontend]
+    mem_limit: 1152m
+    cpus: 1.5
+    logging: *logging
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    image: tokenguard-dashboard:aws
+    restart: unless-stopped
+    env_file: [.env.production]
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      TOKEN_GUARD_API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [frontend]
+    mem_limit: 320m
+    cpus: 0.5
+    logging: *logging
+
+  reverse-proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?API_DOMAIN is required}
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?DASHBOARD_DOMAIN is required}
+      TLS_CONTACT_EMAIL: ${TLS_CONTACT_EMAIL:?TLS_CONTACT_EMAIL is required}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [frontend]
+    mem_limit: 96m
+    logging: *logging
+
+  worker:
+    profiles: [workers]
+    image: tokenguard-api:aws
+    restart: unless-stopped
+    command: ["uv", "run", "--no-sync", "celery", "-A", "app.workers.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    env_file: [.env.production]
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [backend]
+    mem_limit: 768m
+    logging: *logging
+
+  beat:
+    profiles: [workers]
+    image: tokenguard-api:aws
+    restart: unless-stopped
+    command: ["uv", "run", "--no-sync", "celery", "-A", "app.workers.celery_app:celery_app", "beat", "--loglevel=INFO"]
+    env_file: [.env.production]
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tokenguard}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tokenguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [backend]
+    mem_limit: 192m
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
+  frontend: {}
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

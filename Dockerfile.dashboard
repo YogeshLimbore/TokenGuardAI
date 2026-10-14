@@ -6,14 +6,22 @@ ENV UV_SYSTEM_PYTHON=1
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.20 /uv /uvx /bin/
+
+RUN python -m pip uninstall -y pip
 
 COPY pyproject.toml uv.lock ./
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --only-group dashboard --no-install-project
 
 COPY . .
 
+RUN groupadd --system tokenguard \
+    && useradd --system --gid tokenguard --home-dir /app tokenguard \
+    && chown -R tokenguard:tokenguard /app
+
+USER tokenguard
+
 EXPOSE 8501
 
-CMD ["uv", "run", "streamlit", "run", "dashboard/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["uv", "run", "--no-sync", "streamlit", "run", "dashboard/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]

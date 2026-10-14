@@ -23,6 +23,7 @@ class TokenService:
         return max(
             1,
             round(len(words_and_symbols) / 0.75),
+            len(text.encode("utf-8")),
         )
 
     def estimate_message_tokens(

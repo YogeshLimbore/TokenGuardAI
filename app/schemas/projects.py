@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -108,7 +109,26 @@ class ProjectResponse(BaseModel):
     updated_at: datetime
 
 
+KeyScope = Literal[
+    "chat",
+    "analytics:read",
+    "credentials:read",
+    "credentials:manage",
+    "jobs:read",
+    "jobs:create",
+    "jobs:cancel",
+    "security_events:read",
+    "governance:read",
+    "governance:manage",
+]
+
+
+def default_key_scopes() -> list[KeyScope]:
+    return ["chat"]
+
+
 class ProjectAPIKeyCreateRequest(BaseModel):
+    scopes: list[KeyScope] = Field(default_factory=default_key_scopes, min_length=1)
     name: str = Field(
         default="Default",
         min_length=2,
@@ -134,6 +154,7 @@ class ProjectAPIKeyCreateResponse(BaseModel):
 
 
 class ProjectAPIKeyResponse(BaseModel):
+    scopes: list[str] = Field(default_factory=list)
     id: int
     project_id: int
     name: str

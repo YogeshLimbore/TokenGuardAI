@@ -6,13 +6,14 @@ import httpx
 from app.core.config import get_settings
 from app.providers.base import (
     BaseLLMProvider,
+    ProviderError,
     ProviderResponse,
     ProviderStreamEvent,
 )
 from app.schemas.chat import ChatMessage
 
 
-class OllamaProviderError(Exception):
+class OllamaProviderError(ProviderError):
     """
     Raised when Ollama cannot process the request successfully.
     """
@@ -59,12 +60,31 @@ class OllamaProvider(BaseLLMProvider):
             async with httpx.AsyncClient(
                 timeout=self.settings.request_timeout_seconds
             ) as client:
-                response = await client.post(
-                    endpoint,
-                    json=payload,
-                )
-
-                response.raise_for_status()
+                async with client.stream("POST", endpoint, json=payload) as response:
+                    if response.status_code >= 400:
+                        raise OllamaProviderError(
+                            f"Ollama returned HTTP status {response.status_code}.",
+                            status_code=response.status_code,
+                        )
+                    content_length = response.headers.get("content-length")
+                    if (
+                        content_length is not None
+                        and content_length.isdigit()
+                        and int(content_length)
+                        > self.settings.maximum_provider_response_bytes
+                    ):
+                        raise OllamaProviderError(
+                            "Ollama response is too large.", status_code=502
+                        )
+                    chunks: list[bytes] = []
+                    received = 0
+                    async for chunk in response.aiter_bytes():
+                        received += len(chunk)
+                        if received > self.settings.maximum_provider_response_bytes:
+                            raise OllamaProviderError(
+                                "Ollama response is too large.", status_code=502
+                            )
+                        chunks.append(chunk)
 
         except httpx.ConnectError as error:
             raise OllamaProviderError(
@@ -76,13 +96,8 @@ class OllamaProvider(BaseLLMProvider):
                 "Ollama did not respond before the timeout."
             ) from error
 
-        except httpx.HTTPStatusError as error:
-            raise OllamaProviderError(
-                f"Ollama returned HTTP status {error.response.status_code}."
-            ) from error
-
         try:
-            data = response.json()
+            data = json.loads(b"".join(chunks))
         except ValueError as error:
             raise OllamaProviderError(
                 "Ollama returned an invalid JSON response."

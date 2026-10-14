@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC
@@ -21,14 +22,17 @@ from app.observability.metrics import (
     PROVIDER_LATENCY_SECONDS,
 )
 from app.providers.anthropic import AnthropicProviderError
-from app.providers.base import ProviderResponse
+from app.providers.base import ProviderError, ProviderResponse
 from app.providers.factory import ProviderFactory
 from app.providers.groq import GroqProviderError
 from app.providers.ollama import OllamaProviderError
 from app.providers.openai import OpenAIProviderError
 from app.providers.openrouter import OpenRouterProviderError
+from app.providers.registry import get_provider
 from app.schemas.chat import ChatMessage
+from app.services.admission_service import AdmissionService
 from app.services.credential_service import CredentialService
+from app.services.model_policy_service import ModelAccessDeniedError, ModelPolicyService
 from app.services.provider_health_service import (
     ProviderHealthService,
 )
@@ -40,6 +44,7 @@ from app.services.redis_circuit_breaker_service import (
     RedisCircuitBreakerError,
     RedisCircuitBreakerService,
 )
+from app.services.token_service import TokenService
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,7 @@ logger = logging.getLogger(__name__)
 # Fallback treats all of them identically: log the failure, then
 # move on to the next attempt (backup credential or local Ollama).
 PROVIDER_ERRORS = (
+    ProviderError,
     OpenRouterProviderError,
     OllamaProviderError,
     OpenAIProviderError,
@@ -69,9 +75,11 @@ class FallbackResult:
     response: ProviderResponse
     provider: str
     model: str
+    billing_model: str
     credential_id: int | None
     credential_source: str
     attempts_made: int
+    retry_count: int
     fallback_used: bool
 
 
@@ -108,6 +116,13 @@ class FallbackService:
     ) -> list[ProviderAttempt]:
         attempts: list[ProviderAttempt] = []
         used_ids: set[int] = set()
+        policy = ModelPolicyService()
+        policy.enforce_model_access(
+            project_id=project_id,
+            provider=selected_provider,
+            model=selected_model,
+            database=database,
+        )
 
         if selected_provider == "ollama":
             return [
@@ -199,15 +214,35 @@ class FallbackService:
                 )
             )
 
-        attempts.append(
-            ProviderAttempt(
-                provider="ollama",
-                model=ollama_fallback_model,
-                credential_id=None,
-                credential_source="fallback_local",
-                api_key=None,
-            )
-        )
+        if not attempts:
+            spec = get_provider(selected_provider)
+            if spec.api_key:
+                attempts.append(
+                    ProviderAttempt(
+                        selected_provider,
+                        selected_model,
+                        None,
+                        "environment",
+                        spec.api_key,
+                    )
+                )
+        if self.settings.allow_local_fallback and attempts:
+            try:
+                policy.enforce_model_access(
+                    project_id=project_id,
+                    provider="ollama",
+                    model=ollama_fallback_model,
+                )
+            except ModelAccessDeniedError:
+                pass
+            else:
+                attempts.append(
+                    ProviderAttempt(
+                        "ollama", ollama_fallback_model, None, "fallback_local", None
+                    )
+                )
+        if not attempts:
+            raise ValueError("Add an active credential for the selected provider.")
 
         return attempts
 
@@ -304,17 +339,28 @@ class FallbackService:
         messages: list[ChatMessage],
         temperature: float,
         max_tokens: int | None,
+        request_maximum_cost_usd: float | None = None,
+        request_maximum_total_tokens: int | None = None,
+        stream_upstream: bool = False,
     ) -> FallbackResult:
         errors: list[str] = []
+        total_calls = 0
+        deadline = perf_counter() + self.settings.provider_total_timeout_seconds
 
         for attempt_number, attempt in enumerate(
             attempts,
             start=1,
         ):
+            remaining_seconds = deadline - perf_counter()
+            if remaining_seconds <= 0:
+                errors.append("The provider request deadline was exceeded.")
+                break
             started_at = perf_counter()
+            calls = 0
+            circuit_key = f"project:{project_id}:credential:{attempt.credential_id}:{attempt.provider}"
 
             try:
-                self._ensure_circuit_available(provider=attempt.provider)
+                self._ensure_circuit_available(provider=circuit_key)
 
                 # The attempt is bound as a default argument so the
                 # closure cannot pick up a later loop iteration's value.
@@ -326,14 +372,91 @@ class FallbackService:
                         api_key=current_attempt.api_key,
                     )
 
-                    return await provider.generate(
-                        messages=messages,
+                    nonlocal calls, total_calls
+                    calls += 1
+                    total_calls += 1
+                    ModelPolicyService().enforce_model_access(
+                        project_id=project_id,
+                        provider=current_attempt.provider,
                         model=current_attempt.model,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
+                        database=database,
                     )
+                    input_estimate = TokenService().estimate_message_tokens(messages)
+                    admission = AdmissionService()
+                    reservation = admission.reserve(
+                        database,
+                        project_id=project_id,
+                        request_id=request_id,
+                        provider=current_attempt.provider,
+                        model=current_attempt.model,
+                        input_tokens=input_estimate,
+                        max_tokens=max_tokens or self.settings.default_output_tokens,
+                        request_maximum_cost_usd=request_maximum_cost_usd,
+                        request_maximum_total_tokens=request_maximum_total_tokens,
+                    )
+                    result = None
+                    try:
+                        try:
+                            async with asyncio.timeout(
+                                self.settings.request_timeout_seconds
+                            ):
+                                if stream_upstream:
+                                    chunks = []
+                                    input_usage = output_usage = None
+                                    complete = False
+                                    size = 0
+                                    async for event in provider.stream(
+                                        messages=messages,
+                                        model=current_attempt.model,
+                                        temperature=temperature,
+                                        max_tokens=max_tokens,
+                                    ):
+                                        if event.event_type == "token":
+                                            size += len(event.content or "")
+                                            if (
+                                                size
+                                                > self.settings.maximum_request_bytes
+                                            ):
+                                                raise ProviderError(
+                                                    "Provider output exceeded the response size limit.",
+                                                    status_code=502,
+                                                )
+                                            chunks.append(event.content or "")
+                                        elif event.event_type == "usage":
+                                            input_usage, output_usage = (
+                                                event.input_tokens,
+                                                event.output_tokens,
+                                            )
+                                        elif event.event_type == "completed":
+                                            complete = True
+                                    if not complete:
+                                        raise ProviderError(
+                                            "Provider stream ended without completion.",
+                                            status_code=502,
+                                        )
+                                    result = ProviderResponse(
+                                        "".join(chunks),
+                                        current_attempt.model,
+                                        input_usage,
+                                        output_usage,
+                                    )
+                                else:
+                                    result = await provider.generate(
+                                        messages=messages,
+                                        model=current_attempt.model,
+                                        temperature=temperature,
+                                        max_tokens=max_tokens,
+                                    )
+                        except TimeoutError:
+                            raise ProviderError(
+                                "Provider request timed out.", status_code=504
+                            ) from None
+                        return result
+                    finally:
+                        admission.settle(database, reservation, result, input_estimate)
 
-                response = await self.retry_service.execute(provider_operation)
+                async with asyncio.timeout(remaining_seconds):
+                    response = await self.retry_service.execute(provider_operation)
 
                 latency_ms = round(
                     (perf_counter() - started_at) * 1000,
@@ -350,7 +473,7 @@ class FallbackService:
                     latency_ms=latency_ms,
                 )
 
-                self._record_circuit_success(provider=attempt.provider)
+                self._record_circuit_success(provider=circuit_key)
 
                 PROVIDER_ATTEMPTS_TOTAL.labels(
                     provider=attempt.provider,
@@ -371,7 +494,7 @@ class FallbackService:
                     succeeded=True,
                     latency_ms=latency_ms,
                     error_type=None,
-                    retry_count=0,
+                    retry_count=max(0, calls - 1),
                 )
 
                 if attempt_number > 1:
@@ -400,16 +523,24 @@ class FallbackService:
                     response=response,
                     provider=attempt.provider,
                     model=response.model,
+                    billing_model=attempt.model,
                     credential_id=attempt.credential_id,
                     credential_source=(attempt.credential_source),
                     attempts_made=attempt_number,
+                    retry_count=max(0, total_calls - attempt_number),
                     fallback_used=attempt_number > 1,
                 )
 
             except (
                 *PROVIDER_ERRORS,
                 ProviderCircuitOpenError,
+                TimeoutError,
             ) as error:
+                if isinstance(error, TimeoutError):
+                    error = ProviderError(
+                        "The provider request deadline was exceeded.",
+                        status_code=504,
+                    )
                 latency_ms = round(
                     (perf_counter() - started_at) * 1000,
                     2,
@@ -430,7 +561,7 @@ class FallbackService:
                     error,
                     ProviderCircuitOpenError,
                 ):
-                    self._record_circuit_failure(provider=attempt.provider)
+                    self._record_circuit_failure(provider=circuit_key)
 
                 PROVIDER_ATTEMPTS_TOTAL.labels(
                     provider=attempt.provider,
@@ -446,10 +577,13 @@ class FallbackService:
                     succeeded=False,
                     latency_ms=latency_ms,
                     error_type=type(error).__name__,
-                    retry_count=0,
+                    retry_count=max(0, calls - 1),
                 )
 
                 errors.append(f"{attempt.provider}/{attempt.model}: {error}")
+
+                if perf_counter() >= deadline:
+                    break
 
         raise AllProviderAttemptsFailedError(
             "All provider attempts failed.",

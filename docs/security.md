@@ -180,7 +180,8 @@ useless:
 [ ] ALLOW_PUBLIC_REGISTRATION=false
 [ ] STORE_RAW_SECURITY_CONTENT=false
 [ ] POLICY, BUDGET, and RATE_LIMITING enforcement all enabled
-[ ] BOOTSTRAP_ADMIN_PASSWORD cleared after the first admin is created
+[ ] Bootstrap password entered interactively or mounted as a one-time secret
+[ ] Bootstrap password secret removed after the first admin is created
 [ ] TLS verified, HSTS present, PostgreSQL and Redis not publicly reachable
 [ ] Backups running, and a restore actually tested
 [ ] Master key backed up separately from the database backups

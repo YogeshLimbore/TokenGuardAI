@@ -74,10 +74,11 @@ jobs:
       TEST_DATABASE_URL: postgresql+psycopg://tokenguard:tokenguard_password@localhost:5432/tokenguard_test
       REDIS_URL: redis://localhost:6379/1
       TEST_REDIS_URL: redis://localhost:6379/1
+      ALLOW_TEST_DATA_RESET: "true"
       CELERY_BROKER_URL: redis://localhost:6379/11
       CELERY_RESULT_BACKEND: redis://localhost:6379/12
       JWT_SECRET_KEY: ci-test-jwt-secret-key-that-is-long-enough-1234567890abcd
-      TOKEN_GUARD_MASTER_KEY: dGVzdC1vbmx5LWZlcm5ldC1rZXktZm9yLWNpLXRlc3RpbmcxMjM0NT0=
+      TOKEN_GUARD_MASTER_KEY: r2I4XCYW2jF05dwX26b4XIOEOnjyIJ6a6cADGcQmWlw=
       ADMIN_API_KEY_HASH: bc89df34c00163be4286bdebff28e39964e3490e369deea3bc9b4a4b8bccdd3e
       ENVIRONMENT: test
       DEBUG: "false"

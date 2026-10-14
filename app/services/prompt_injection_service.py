@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from app.core.config import get_settings
@@ -18,9 +20,31 @@ class PromptInjectionResult:
 
 
 class PromptInjectionService:
+    _CONFUSABLES = str.maketrans(
+        {
+            "\u0430": "a",
+            "\u0435": "e",
+            "\u0456": "i",
+            "\u043e": "o",
+            "\u0440": "p",
+            "\u0441": "c",
+            "\u0445": "x",
+            "\u0391": "A",
+            "\u0392": "B",
+            "\u0395": "E",
+            "\u0399": "I",
+            "\u039a": "K",
+            "\u039c": "M",
+            "\u039d": "N",
+            "\u039f": "O",
+            "\u03a1": "P",
+            "\u03a4": "T",
+            "\u03a7": "X",
+        }
+    )
     PATTERNS: tuple[tuple[str, str, int], ...] = (
         (
-            r"\bignore\s+(all\s+)?previous\s+instructions\b",
+            r"\bignore\s*(all\s*)?previous\s*instructions\b",
             "instruction_override",
             45,
         ),
@@ -84,6 +108,44 @@ class PromptInjectionService:
     def __init__(self) -> None:
         self.settings = get_settings()
 
+    @classmethod
+    def _normalize_text(cls, text: str) -> str:
+        normalized = unicodedata.normalize("NFKC", text).translate(cls._CONFUSABLES)
+        normalized = "".join(
+            character
+            for character in normalized
+            if unicodedata.category(character) != "Cf"
+        )
+        # A common substitution uses capital I as a visual lowercase l in "all".
+        normalized = re.sub(r"\ba[Ii][Ii]\b", "all", normalized)
+        normalized = normalized.lower()
+        # Collapse words split into individual characters: "i g n o r e".
+        normalized = re.sub(
+            r"(?<!\w)(?:[a-z]\s+){2,}[a-z](?!\w)",
+            lambda match: re.sub(r"\s+", "", match.group(0)),
+            normalized,
+        )
+        return " ".join(normalized.split())
+
+    @classmethod
+    def _decoded_base64_text(cls, text: str) -> str:
+        decoded: list[str] = []
+        for candidate in re.findall(
+            r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={0,2}", text
+        )[:20]:
+            if len(candidate) % 4:
+                continue
+            try:
+                raw = base64.b64decode(candidate, validate=True)
+                value = raw.decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if len(value) <= 4096 and all(
+                character.isprintable() or character.isspace() for character in value
+            ):
+                decoded.append(value)
+        return " ".join(decoded)
+
     def analyze(
         self,
         text: str,
@@ -96,7 +158,10 @@ class PromptInjectionService:
                 findings=[],
             )
 
-        normalized = " ".join(text.lower().split())
+        normalized = self._normalize_text(text)
+        decoded = self._decoded_base64_text(text)
+        if decoded:
+            normalized = f"{normalized} {self._normalize_text(decoded)}"
 
         findings: list[PromptInjectionFinding] = []
 

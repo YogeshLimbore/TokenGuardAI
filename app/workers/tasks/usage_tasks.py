@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -14,14 +14,16 @@ from app.workers.celery_app import celery_app
 @celery_app.task(
     name="tokenguard.aggregate_project_usage",
 )
-def aggregate_project_usage() -> dict[str, int]:
+def aggregate_project_usage(days: int = 2) -> dict[str, int]:
     database = SessionLocal()
 
     try:
         today = datetime.now(UTC).date()
+        days = max(1, min(days, 90))
+        first_day = today - timedelta(days=days - 1)
 
         start = datetime.combine(
-            today,
+            first_day,
             datetime.min.time(),
             tzinfo=UTC,
         )
@@ -29,6 +31,7 @@ def aggregate_project_usage() -> dict[str, int]:
         statement = (
             select(
                 LLMRequestLog.project_id,
+                func.date(LLMRequestLog.created_at).label("usage_date"),
                 func.count(LLMRequestLog.id).label("request_count"),
                 func.sum(
                     case(
@@ -83,7 +86,10 @@ def aggregate_project_usage() -> dict[str, int]:
                 LLMRequestLog.created_at >= start,
                 LLMRequestLog.project_id.is_not(None),
             )
-            .group_by(LLMRequestLog.project_id)
+            .group_by(
+                LLMRequestLog.project_id,
+                func.date(LLMRequestLog.created_at),
+            )
         )
 
         rows = database.execute(statement).all()
@@ -91,7 +97,7 @@ def aggregate_project_usage() -> dict[str, int]:
         for row in rows:
             insert_statement = insert(ProjectUsageDaily).values(
                 project_id=row.project_id,
-                usage_date=today,
+                usage_date=row.usage_date,
                 request_count=int(row.request_count or 0),
                 successful_requests=int(row.successful_requests or 0),
                 failed_requests=int(row.failed_requests or 0),
@@ -125,7 +131,10 @@ def aggregate_project_usage() -> dict[str, int]:
 
         database.commit()
 
-        return {"projects_aggregated": len(rows)}
+        return {
+            "projects_aggregated": len({row.project_id for row in rows}),
+            "daily_records_aggregated": len(rows),
+        }
 
     finally:
         database.close()

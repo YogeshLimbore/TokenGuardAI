@@ -149,7 +149,7 @@ async def test_openai_reports_cached_input_tokens(
 @pytest.mark.parametrize(
     ("status_code", "expected_fragment"),
     [
-        (401, "rejected the API key"),
+        (401, "authentication failed"),
         (429, "rate limit"),
     ],
 )
@@ -170,7 +170,7 @@ async def test_openai_maps_authentication_and_rate_limit_errors(
 
 
 @pytest.mark.anyio
-async def test_openai_surfaces_provider_error_message(
+async def test_openai_does_not_surface_provider_error_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install_mock_transport(
@@ -181,8 +181,9 @@ async def test_openai_surfaces_provider_error_message(
         ),
     )
 
-    with pytest.raises(OpenAIProviderError, match="model_not_found"):
+    with pytest.raises(OpenAIProviderError, match="HTTP 404") as raised:
         await OpenAIProvider(api_key="sk-testonly-openai").generate(messages=MESSAGES)
+    assert "model_not_found" not in str(raised.value)
 
 
 @pytest.mark.anyio
@@ -194,8 +195,9 @@ async def test_openai_handles_non_json_error_body(
         text_responder("<html>gateway error</html>", status_code=502),
     )
 
-    with pytest.raises(OpenAIProviderError, match="gateway error"):
+    with pytest.raises(OpenAIProviderError, match="HTTP 502") as raised:
         await OpenAIProvider(api_key="sk-testonly-openai").generate(messages=MESSAGES)
+    assert "gateway error" not in str(raised.value)
 
 
 @pytest.mark.anyio
@@ -216,7 +218,7 @@ async def test_openai_rejects_malformed_success_payload(
     ("error", "expected_fragment"),
     [
         (httpx.ConnectError("refused"), "connect"),
-        (httpx.ReadTimeout("timed out"), "timeout"),
+        (httpx.ReadTimeout("timed out"), "timed out"),
     ],
 )
 async def test_openai_maps_transport_failures(
@@ -423,6 +425,33 @@ async def test_ollama_connection_failure_is_actionable(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("provider", "error_type"),
+    [
+        (AnthropicProvider(api_key="sk-ant-testonly-key"), AnthropicProviderError),
+        (OllamaProvider(), OllamaProviderError),
+        (OpenAIProvider(api_key="sk-testonly-openai"), OpenAIProviderError),
+    ],
+)
+async def test_non_streaming_providers_reject_oversized_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: BaseLLMProvider,
+    error_type: type[Exception],
+) -> None:
+    install_mock_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            headers={"content-length": "999999999"},
+            content=b"{}",
+        ),
+    )
+
+    with pytest.raises(error_type, match="too large"):
+        await provider.generate(messages=MESSAGES, model="test-model")
+
+
+@pytest.mark.anyio
 async def test_ollama_stream_emits_tokens_then_usage_then_completed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -558,12 +587,31 @@ async def test_openrouter_stream_reports_http_errors(
 
 
 @pytest.mark.anyio
-async def test_streaming_is_not_implemented_for_openai_style_providers() -> None:
-    with pytest.raises(NotImplementedError):
-        async for _event in OpenAIProvider(api_key="sk-testonly-openai").stream(
+async def test_openai_style_provider_streaming_is_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_mock_transport(
+        monkeypatch,
+        stream_responder(
+            [
+                'data: {"choices":[{"delta":{"content":"Four"}}]}',
+                'data: {"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}}',
+                "data: [DONE]",
+            ]
+        ),
+    )
+    events = [
+        event
+        async for event in OpenAIProvider(api_key="sk-testonly-openai").stream(
             messages=MESSAGES,
             model=None,
             temperature=0.0,
             max_tokens=None,
-        ):
-            pass
+        )
+    ]
+    assert [event.event_type for event in events] == [
+        "token",
+        "usage",
+        "completed",
+    ]
+    assert events[0].content == "Four"

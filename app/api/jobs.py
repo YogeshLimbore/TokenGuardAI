@@ -8,7 +8,7 @@ from fastapi import (
     HTTPException,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_database_session
@@ -83,6 +83,24 @@ async def create_semantic_evaluation_job(
     project: Project = Depends(get_current_project),
     database: Session = Depends(get_database_session),
 ) -> BackgroundJobResponse:
+    # Serialize admission for this project so concurrent requests cannot all
+    # pass the active-job quota before inserting their rows.
+    database.scalar(select(Project).where(Project.id == project.id).with_for_update())
+    from app.core.config import get_settings
+
+    active_jobs = database.scalar(
+        select(func.count(BackgroundJob.id)).where(
+            BackgroundJob.project_id == project.id,
+            BackgroundJob.status.in_({"queued", "running"}),
+        )
+    )
+    if (active_jobs or 0) >= get_settings().maximum_active_jobs_per_project:
+        database.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="The project has reached its active background-job limit.",
+        )
+
     job_id = str(uuid4())
 
     job = BackgroundJob(
@@ -98,14 +116,23 @@ async def create_semantic_evaluation_job(
     database.commit()
     database.refresh(job)
 
-    run_semantic_evaluation.apply_async(
-        task_id=job_id,
-        kwargs={
-            "database_job_id": job.id,
-            "project_id": project.id,
-            "dataset_path": request.dataset_path,
-        },
-    )
+    try:
+        run_semantic_evaluation.apply_async(
+            task_id=job_id,
+            kwargs={
+                "database_job_id": job.id,
+                "project_id": project.id,
+                "dataset_path": request.dataset_path,
+            },
+        )
+    except Exception as error:
+        job.status = "failed"
+        job.error_message = "The job could not be published to the worker queue."
+        database.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The background-job service is unavailable.",
+        ) from error
 
     return job_to_response(job)
 

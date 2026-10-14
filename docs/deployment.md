@@ -123,15 +123,15 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
 ### 4. Create the first administrator
 
 ```bash
-# temporarily in .env.production
-BOOTSTRAP_ADMIN_EMAIL=admin@example.com
-BOOTSTRAP_ADMIN_PASSWORD=<long-random-password>
-
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  --env-file .env.production exec api uv run python scripts/bootstrap_admin.py
+  --env-file .env.production exec api uv run --no-sync python \
+  scripts/bootstrap_admin.py --email admin@example.com
 ```
 
-Then clear `BOOTSTRAP_ADMIN_PASSWORD` and restart the API.
+The command prompts twice with hidden input. For non-interactive automation,
+mount a secret file read-only and pass `--password-file`; remove the mount as
+soon as bootstrap succeeds. Never place the password in an environment variable
+or command argument.
 
 ### 5. Verify
 
@@ -284,3 +284,9 @@ than no alert.
 - Run exactly one `beat` instance, or scheduled tasks fire multiple times.
 - Prefer managed PostgreSQL and Redis in cloud deployments, and point
   `DATABASE_URL` and `REDIS_URL` at them instead of running the containers.
+
+## AWS Free Tier staging
+
+For a guarded single-host staging deployment on a new AWS Free account plan,
+see [AWS Free Tier staging deployment](aws-free-tier-deployment.md). The script
+refuses to provision resources on a paid, expired, or low-credit account.

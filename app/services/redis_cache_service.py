@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any
 
@@ -31,30 +30,10 @@ class RedisExactCacheService:
         provider: str,
         model: str,
     ) -> str:
-        normalized = {
-            "project_id": project_id,
-            "provider": provider.lower(),
-            "model": model,
-            "messages": [
-                {
-                    "role": message.role,
-                    "content": message.content.strip(),
-                }
-                for message in request.messages
-            ],
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-        }
+        from app.services.cache_service import CacheService
 
-        encoded = json.dumps(
-            normalized,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-
-        digest = hashlib.sha256(encoded).hexdigest()
-
+        request = request.model_copy(update={"provider": provider})
+        digest = CacheService.generate_cache_key(request, model, project_id)
         return f"{self.settings.redis_exact_cache_prefix}:project:{project_id}:{digest}"
 
     def get(

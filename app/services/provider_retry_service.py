@@ -46,6 +46,8 @@ def is_retryable_provider_error(
         None,
     )
 
+    if status_code is not None and status_code < 408:
+        return False
     if status_code in {
         408,
         409,
@@ -87,7 +89,7 @@ def log_retry(
         extra={
             "attempt_number": (retry_state.attempt_number),
             "error_type": (type(error).__name__ if error else None),
-            "error_message": (str(error) if error else None),
+            "error_message": "Upstream request failed.",
         },
     )
 

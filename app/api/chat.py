@@ -1,3 +1,4 @@
+import asyncio
 import json
 from time import perf_counter
 from uuid import uuid4
@@ -46,6 +47,7 @@ from app.schemas.routing import (
 )
 from app.services.budget_service import (
     BudgetConfigurationError,
+    BudgetExceededError,
     BudgetService,
 )
 from app.services.cache_service import CacheService
@@ -87,6 +89,7 @@ from app.services.redis_rate_limit_service import (
 )
 from app.services.routing_service import (
     RoutingConfigurationError,
+    RoutingRequestError,
     RoutingService,
 )
 from app.services.security_audit_service import (
@@ -131,14 +134,16 @@ def create_request_log(
     latency_ms: float,
     status_value: str,
     error_message: str | None = None,
+    tokens_avoided: int = 0,
+    cost_avoided_usd: float = 0.0,
 ) -> None:
     log = LLMRequestLog(
         project_id=project_id,
         request_id=request_id,
         provider=provider,
         model=model,
-        prompt=prompt,
-        response=response,
+        prompt=prompt if settings.store_request_content else "[content not retained]",
+        response=response if settings.store_request_content else None,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=total_tokens,
@@ -146,6 +151,8 @@ def create_request_log(
         latency_ms=latency_ms,
         status=status_value,
         error_message=error_message,
+        tokens_avoided=tokens_avoided,
+        cost_avoided_usd=cost_avoided_usd,
     )
 
     database.add(log)
@@ -197,6 +204,11 @@ async def create_chat_completion(
 
         try:
             route = routing_service.decide(request)
+        except RoutingRequestError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
         except RoutingConfigurationError as error:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -319,7 +331,8 @@ async def create_chat_completion(
             else (request.max_tokens or route.maximum_output_tokens)
         )
 
-        requested_output_tokens = effective_max_tokens or 500
+        effective_max_tokens = effective_max_tokens or settings.default_output_tokens
+        requested_output_tokens = effective_max_tokens
 
         try:
             budget_result = budget_service.evaluate(
@@ -614,6 +627,28 @@ async def create_chat_completion(
                 },
             )
 
+        try:
+            attempts = fallback_service.build_attempts(
+                database,
+                project_id=project.id,
+                selected_provider=selected_provider_name,
+                selected_model=selected_model,
+                explicit_credential_id=(
+                    None if credential_not_applicable else routed_request.credential_id
+                ),
+                ollama_fallback_model="llama3.2",
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+        except CredentialNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+
         cache_key = cache_service.generate_cache_key(
             request=routed_request,
             selected_model=selected_model,
@@ -647,6 +682,15 @@ async def create_chat_completion(
                     # unreachable.
                     redis_cache_hit = None
 
+            if (
+                redis_cache_hit is not None
+                and not (
+                    await governance_service.evaluate_output(
+                        text=redis_cache_hit["content"]
+                    )
+                ).safe
+            ):
+                redis_cache_hit = None
             if redis_cache_hit is not None:
                 lookup_latency_ms = round(
                     (perf_counter() - lookup_started_at) * 1000,
@@ -658,6 +702,8 @@ async def create_chat_completion(
                     model=redis_cache_hit["model"],
                     input_tokens=redis_cache_hit["input_tokens"],
                     output_tokens=redis_cache_hit["output_tokens"],
+                    database=database,
+                    project_id=project.id,
                 )
 
                 total_latency_ms = round(
@@ -679,6 +725,8 @@ async def create_chat_completion(
                     estimated_cost_usd=0.0,
                     latency_ms=total_latency_ms,
                     status_value="cache_hit",
+                    tokens_avoided=redis_cache_hit["total_tokens"],
+                    cost_avoided_usd=avoided_cost.total_cost_usd,
                 )
 
                 CACHE_OPERATIONS_TOTAL.labels(
@@ -742,6 +790,15 @@ async def create_chat_completion(
                 2,
             )
 
+            if (
+                cached_response is not None
+                and not (
+                    await governance_service.evaluate_output(
+                        text=cached_response.response
+                    )
+                ).safe
+            ):
+                cached_response = None
             if cached_response is not None:
                 cache_service.register_cache_hit(
                     database=database,
@@ -753,6 +810,8 @@ async def create_chat_completion(
                     model=cached_response.model,
                     input_tokens=cached_response.input_tokens,
                     output_tokens=cached_response.output_tokens,
+                    database=database,
+                    project_id=project.id,
                 )
 
                 total_latency_ms = round(
@@ -774,6 +833,8 @@ async def create_chat_completion(
                     estimated_cost_usd=0.0,
                     latency_ms=total_latency_ms,
                     status_value="cache_hit",
+                    tokens_avoided=cached_response.total_tokens,
+                    cost_avoided_usd=avoided_cost.total_cost_usd,
                 )
 
                 CACHE_OPERATIONS_TOTAL.labels(
@@ -846,6 +907,15 @@ async def create_chat_completion(
                 2,
             )
 
+            if (
+                semantic_match is not None
+                and not (
+                    await governance_service.evaluate_output(
+                        text=semantic_match.entry.response
+                    )
+                ).safe
+            ):
+                semantic_match = None
             if semantic_match is not None:
                 cached_entry = semantic_match.entry
 
@@ -873,6 +943,8 @@ async def create_chat_completion(
                     estimated_cost_usd=0.0,
                     latency_ms=total_latency_ms,
                     status_value="semantic_cache_hit",
+                    tokens_avoided=cached_entry.total_tokens,
+                    cost_avoided_usd=cached_entry.original_cost_usd,
                 )
 
                 CACHE_OPERATIONS_TOTAL.labels(
@@ -939,28 +1011,6 @@ async def create_chat_completion(
         )
 
         try:
-            attempts = fallback_service.build_attempts(
-                database,
-                project_id=project.id,
-                selected_provider=selected_provider_name,
-                selected_model=selected_model,
-                explicit_credential_id=(
-                    None if credential_not_applicable else routed_request.credential_id
-                ),
-                ollama_fallback_model="llama3.2",
-            )
-        except ValueError as error:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(error),
-            ) from error
-        except CredentialNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=str(error),
-            ) from error
-
-        try:
             fallback_result = await fallback_service.execute(
                 database,
                 project_id=project.id,
@@ -969,6 +1019,9 @@ async def create_chat_completion(
                 messages=routed_request.messages,
                 temperature=routed_request.temperature,
                 max_tokens=routed_request.max_tokens,
+                request_maximum_cost_usd=request.maximum_request_cost_usd,
+                request_maximum_total_tokens=request.maximum_total_tokens,
+                stream_upstream=request._stream_upstream,
             )
 
             provider_response = fallback_result.response
@@ -994,7 +1047,18 @@ async def create_chat_completion(
                 model=final_model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                database=database,
+                project_id=project.id,
             )
+            if not cost.pricing_found and fallback_result.billing_model != final_model:
+                cost = pricing_service.calculate_cost(
+                    provider=final_provider_name,
+                    model=fallback_result.billing_model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    database=database,
+                    project_id=project.id,
+                )
 
             total_latency_ms = round(
                 (perf_counter() - started_at) * 1000,
@@ -1102,7 +1166,11 @@ async def create_chat_completion(
                 status_value="completed",
             )
 
-            if request.use_cache:
+            if (
+                request.use_cache
+                and final_provider_name == selected_provider_name
+                and final_model == selected_model
+            ):
                 cache_service.save_response(
                     database=database,
                     cache_key=cache_key,
@@ -1137,6 +1205,10 @@ async def create_chat_completion(
             if (
                 request.use_cache
                 and request.use_semantic_cache
+                and settings.semantic_cache_enabled
+                and final_provider_name == selected_provider_name
+                and final_model == selected_model
+                and routed_request.messages[-1].role == "user"
                 and not semantic_cache_service.response_already_stored(
                     database,
                     project_id=project.id,
@@ -1236,7 +1308,7 @@ async def create_chat_completion(
             reliability = ReliabilityDetails(
                 correlation_id=(get_correlation_id() or request_id),
                 provider_attempts=(fallback_result.attempts_made),
-                retry_count=0,
+                retry_count=fallback_result.retry_count,
                 circuit_breaker_state=(circuit_state_value),
                 provider_health_score=(health_result.score),
                 fallback_used=(fallback_result.fallback_used),
@@ -1272,6 +1344,31 @@ async def create_chat_completion(
                 governance=governance_result.decision,
                 reliability=reliability,
             )
+
+        except BudgetExceededError as error:
+            raise HTTPException(
+                status_code=402,
+                detail={"message": str(error), "reasons": error.reasons},
+            ) from error
+
+        except asyncio.CancelledError:
+            database.rollback()
+            create_request_log(
+                database=database,
+                project_id=project.id,
+                request_id=request_id,
+                provider=selected_provider_name,
+                model=selected_model,
+                prompt=combined_prompt,
+                response=None,
+                input_tokens=estimated_input_tokens,
+                output_tokens=0,
+                total_tokens=estimated_input_tokens,
+                estimated_cost_usd=0,
+                latency_ms=(perf_counter() - started_at) * 1000,
+                status_value="cancelled",
+            )
+            raise
 
         except AllProviderAttemptsFailedError as error:
             database.rollback()

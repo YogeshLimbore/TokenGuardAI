@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from typing import Any, cast
 
 from presidio_analyzer import (
     AnalyzerEngine,
     RecognizerResult,
 )
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import (
     AnonymizerEngine,
 )
@@ -36,7 +37,13 @@ def _get_analyzer_engine() -> AnalyzerEngine:
     # construction time, which is expensive. GovernanceService
     # builds a fresh PIIService per request, so this must be
     # cached at module scope rather than re-created every call.
-    return AnalyzerEngine()
+    nlp_engine = NlpEngineProvider(
+        nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+        }
+    ).create_engine()
+    return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
 
 
 @lru_cache
@@ -47,8 +54,14 @@ def _get_anonymizer_engine() -> AnonymizerEngine:
 class PIIService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.analyzer = _get_analyzer_engine()
-        self.anonymizer = _get_anonymizer_engine()
+
+    @cached_property
+    def analyzer(self) -> AnalyzerEngine:
+        return _get_analyzer_engine()
+
+    @cached_property
+    def anonymizer(self) -> AnonymizerEngine:
+        return _get_anonymizer_engine()
 
     def scan(
         self,

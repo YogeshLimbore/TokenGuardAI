@@ -41,12 +41,14 @@ rollout, migrate as a separate step first, as `deploy_production.ps1` does.
 ## Health
 
 ```bash
+curl -s http://localhost:8000/live
+curl --fail -s http://localhost:8000/ready
 curl -s http://localhost:8000/health
 ```
 
-Expected: HTTP 200 with database and Redis dependency status.
-
-Docker Compose marks the API healthy once `/health` succeeds.
+`/live` confirms the process is running. `/ready` returns HTTP 503 until both
+PostgreSQL and Redis are usable and is the endpoint used by Docker Compose.
+`/health` retains the detailed dependency report for operators.
 
 ## Metrics
 

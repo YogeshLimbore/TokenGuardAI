@@ -162,7 +162,7 @@ def test_prompts_are_normalized_before_encoding(
     assert embedding_model.encoded == ["explain caching", "explain caching"]
 
 
-def test_the_system_fingerprint_ignores_formatting_but_not_content(
+def test_the_system_fingerprint_preserves_exact_instruction_text(
     service: SemanticCacheService,
 ) -> None:
     baseline = service.create_system_fingerprint(
@@ -175,7 +175,7 @@ def test_the_system_fingerprint_ignores_formatting_but_not_content(
         _request("Hello.", system="You are a pirate.")
     )
 
-    assert baseline == reformatted
+    assert baseline != reformatted
     assert baseline != different
 
 
