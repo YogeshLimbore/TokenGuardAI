@@ -90,8 +90,8 @@ On the instance:
 
 ```bash
 cd /opt/tokenguard/app
-docker compose -f docker-compose.aws.yml ps
-docker compose -f docker-compose.aws.yml logs --tail=200
+docker compose --env-file .env.production -f docker-compose.aws.yml ps
+docker compose --env-file .env.production -f docker-compose.aws.yml logs --tail=200
 sudo tail -n 300 /var/log/tokenguard-bootstrap.log
 sudo systemctl list-timers tokenguard-backup.timer
 ```

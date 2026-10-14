@@ -169,4 +169,4 @@ Write-Host "API after tunnel starts:       $($values.ApiUrl)"
 Write-Host "SSH:       ssh -i `"$keyPath`" ubuntu@$($values.PublicIp)"
 Write-Host ''
 Write-Host 'Create the first administrator with:'
-Write-Host "ssh -t -i `"$keyPath`" ubuntu@$($values.PublicIp) 'cd /opt/tokenguard/app && docker compose -f docker-compose.aws.yml exec api uv run --no-sync python scripts/bootstrap_admin.py --email admin@example.com'"
+Write-Host "ssh -t -i `"$keyPath`" ubuntu@$($values.PublicIp) 'cd /opt/tokenguard/app && docker compose --env-file .env.production -f docker-compose.aws.yml exec api uv run --no-sync python scripts/bootstrap_admin.py --email admin@example.com'"

@@ -183,8 +183,8 @@ Resources:
           chown ubuntu:ubuntu .env.production
           chmod 600 .env.production
 
-          COMPOSE_BAKE=false docker compose -f docker-compose.aws.yml build
-          docker compose -f docker-compose.aws.yml up -d
+          COMPOSE_BAKE=false docker compose --env-file .env.production -f docker-compose.aws.yml build
+          docker compose --env-file .env.production -f docker-compose.aws.yml up -d
 
           cat > /usr/local/sbin/tokenguard-backup <<'BACKUP'
           #!/usr/bin/env bash
@@ -192,7 +192,7 @@ Resources:
           cd /opt/tokenguard/app
           install -d -m 700 /opt/tokenguard/backups
           stamp=$(date -u +%Y%m%dT%H%M%SZ)
-          docker compose -f docker-compose.aws.yml exec -T postgres pg_dump \
+          docker compose --env-file .env.production -f docker-compose.aws.yml exec -T postgres pg_dump \
             -U tokenguard -d tokenguard -Fc > "/opt/tokenguard/backups/$stamp.dump"
           find /opt/tokenguard/backups -type f -name '*.dump' -mtime +7 -delete
           BACKUP
@@ -219,7 +219,7 @@ Resources:
           systemctl daemon-reload
           systemctl enable --now tokenguard-backup.timer
 
-          docker compose -f docker-compose.aws.yml ps
+          docker compose --env-file .env.production -f docker-compose.aws.yml ps
 
 Outputs:
   InstanceId:
